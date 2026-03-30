@@ -72,10 +72,11 @@ for t in meta:
     exit 0
 fi
 
-# Resolve magnet links for requested collections
 echo "Resolving collections..."
 
-DOWNLOAD_INFO=$(echo "$TORRENTS_JSON" | python3 -c "
+# Write magnet links to a temp file (avoids eval + special char issues)
+MAGNET_FILE=$(mktemp)
+echo "$TORRENTS_JSON" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 collections = [c.strip() for c in sys.argv[1].split(',')]
@@ -91,44 +92,43 @@ for t in meta:
             break
 
 total_gb = sum(v['size'] for v in found.values())
-print(f'TOTAL_SIZE={total_gb:.1f}')
-print(f'TOTAL_COUNT={len(found)}')
+print(f'  Found {len(found)} collection(s), total ~{total_gb:.1f} GB', file=sys.stderr)
+print(f'', file=sys.stderr)
 
-for i, (c, info) in enumerate(found.items()):
-    print(f'COLL_{i}_NAME={c}')
-    print(f'COLL_{i}_FILE={info[\"name\"]}')
-    print(f'COLL_{i}_SIZE={info[\"size\"]:.1f}')
-    print(f'COLL_{i}_SEEDERS={info[\"seeders\"]}')
-    print(f'COLL_{i}_MAGNET={info[\"magnet\"]}')
+for c, info in found.items():
+    # Tab-separated: collection_name \t size_gb \t seeders \t filename \t magnet_link
+    print(f'{c}\t{info[\"size\"]:.1f}\t{info[\"seeders\"]}\t{info[\"name\"]}\t{info[\"magnet\"]}')
 
 for c in collections:
     if c not in found:
-        print(f'WARNING: \"{c}\" not found', file=sys.stderr)
-" "$COLLECTIONS" 2>&1)
+        print(f'  WARNING: \"{c}\" not found in torrents.json', file=sys.stderr)
+" "$COLLECTIONS" > "$MAGNET_FILE" 2>&1
 
-# Parse the download info
-eval "$(echo "$DOWNLOAD_INFO" | grep -E '^(TOTAL_|COLL_)')"
+# Count collections
+TOTAL_COUNT=$(grep -c $'\t' "$MAGNET_FILE" || echo 0)
+if [ "$TOTAL_COUNT" -eq 0 ]; then
+    echo "ERROR: No matching collections found."
+    echo "Run with COLLECTIONS=list to see available collections."
+    rm -f "$MAGNET_FILE"
+    exit 1
+fi
 
-echo ""
-echo "  Found $TOTAL_COUNT collection(s), total ~${TOTAL_SIZE} GB"
-echo ""
+# Print any stderr messages (info/warnings) that ended up in the file
+grep -v $'\t' "$MAGNET_FILE" || true
 
-# Download each collection sequentially with progress
+# Download each collection
 COMPLETED=0
 START_TIME=$(date +%s)
 
-for i in $(seq 0 $((TOTAL_COUNT - 1))); do
-    eval "NAME=\$COLL_${i}_NAME"
-    eval "FILE=\$COLL_${i}_FILE"
-    eval "SIZE=\$COLL_${i}_SIZE"
-    eval "SEEDERS=\$COLL_${i}_SEEDERS"
-    eval "MAGNET=\$COLL_${i}_MAGNET"
+while IFS=$'\t' read -r NAME SIZE SEEDERS FILENAME MAGNET; do
+    # Skip non-data lines (info messages from stderr)
+    [ -z "$MAGNET" ] && continue
 
     COMPLETED=$((COMPLETED + 1))
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$COMPLETED/$TOTAL_COUNT] Downloading: $NAME"
     echo "  Size: ${SIZE} GB | Seeders: $SEEDERS"
-    echo "  File: $FILE"
+    echo "  File: $FILENAME"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
@@ -159,7 +159,10 @@ for i in $(seq 0 $((TOTAL_COUNT - 1))); do
     echo ""
     echo "  Completed $NAME (${ELAPSED_MIN}m elapsed total)"
     echo ""
-done
+
+done < "$MAGNET_FILE"
+
+rm -f "$MAGNET_FILE"
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
