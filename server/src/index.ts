@@ -16,21 +16,25 @@ if (transport === "stdio") {
 
   const AUTH_TOKEN = process.env.AUTH_TOKEN;
 
-  // Auth middleware
+  // Auth middleware — supports both header and query param
   if (AUTH_TOKEN) {
     app.use("/mcp", (req, res, next) => {
       const auth = req.headers.authorization;
-      if (!auth || auth !== `Bearer ${AUTH_TOKEN}`) {
-        res.status(401).json({ error: "Unauthorized" });
+      const queryToken = req.query.token as string | undefined;
+      if (auth === `Bearer ${AUTH_TOKEN}` || queryToken === AUTH_TOKEN) {
+        next();
         return;
       }
-      next();
+      res.status(401).json({ error: "Unauthorized" });
     });
   }
 
   // Streamable HTTP transport — fresh server per request (stateless)
   app.post("/mcp", async (req, res) => {
-    const secretKey = (req.headers["x-annas-secret-key"] as string) || "";
+    const secretKey =
+      (req.headers["x-annas-secret-key"] as string) ||
+      (req.query.aa_key as string) ||
+      "";
     const server = createServer(secretKey);
     const httpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
