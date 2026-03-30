@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Anna's Archive Metadata Downloader
 # Downloads AAC metadata collections via BitTorrent using aria2c
+# All collections download in parallel.
 
 ANNAS_BASE_URL="${ANNAS_BASE_URL:-annas-archive.gl}"
 OUTPUT_DIR="${OUTPUT_DIR:-/data/aac}"
@@ -74,8 +75,8 @@ fi
 
 echo "Resolving collections..."
 
-# Write magnet links to a temp file (avoids eval + special char issues)
-MAGNET_FILE=$(mktemp)
+# Write an aria2c input file with all magnets (parallel download)
+INPUT_FILE=$(mktemp)
 echo "$TORRENTS_JSON" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
@@ -88,81 +89,68 @@ for t in meta:
         if c in name and c not in found:
             size_gb = t.get('data_size', 0) / (1024**3)
             seeders = t.get('seeders', 0)
-            found[c] = {'magnet': t['magnet_link'], 'name': name, 'size': size_gb, 'seeders': seeders}
+            found[c] = t
+            print(f'  {c:<30} {size_gb:>7.1f} GB  {seeders:>3} seeders', file=sys.stderr)
             break
 
-total_gb = sum(v['size'] for v in found.values())
-print(f'  Found {len(found)} collection(s), total ~{total_gb:.1f} GB', file=sys.stderr)
+total_gb = sum(t.get('data_size',0) / (1024**3) for t in found.values())
 print(f'', file=sys.stderr)
+print(f'  Total: ~{total_gb:.1f} GB across {len(found)} collection(s)', file=sys.stderr)
 
-for c, info in found.items():
-    # Tab-separated: collection_name \t size_gb \t seeders \t filename \t magnet_link
-    print(f'{c}\t{info[\"size\"]:.1f}\t{info[\"seeders\"]}\t{info[\"name\"]}\t{info[\"magnet\"]}')
+# aria2c input file format: URI on one line, options on next lines prefixed with space
+for c, t in found.items():
+    print(t['magnet_link'])
+    print(f'  out={t[\"display_name\"]}')
+    print()
 
 for c in collections:
     if c not in found:
-        print(f'  WARNING: \"{c}\" not found in torrents.json', file=sys.stderr)
-" "$COLLECTIONS" > "$MAGNET_FILE" 2>&1
+        print(f'  WARNING: \"{c}\" not found', file=sys.stderr)
+" "$COLLECTIONS" > "$INPUT_FILE" 2>&1
 
-# Count collections
-TOTAL_COUNT=$(grep -c $'\t' "$MAGNET_FILE" || echo 0)
-if [ "$TOTAL_COUNT" -eq 0 ]; then
+# Print the info messages (they went to the file via stderr redirect)
+grep -v '^magnet:' "$INPUT_FILE" | grep -v '^ ' | grep -v '^$' || true
+
+# Check we have at least one magnet
+if ! grep -q '^magnet:' "$INPUT_FILE"; then
     echo "ERROR: No matching collections found."
     echo "Run with COLLECTIONS=list to see available collections."
-    rm -f "$MAGNET_FILE"
+    rm -f "$INPUT_FILE"
     exit 1
 fi
 
-# Print any stderr messages (info/warnings) that ended up in the file
-grep -v $'\t' "$MAGNET_FILE" || true
+echo ""
+echo "Starting parallel downloads with aria2c..."
+echo "(all collections download simultaneously)"
+echo ""
 
-# Download each collection
-COMPLETED=0
 START_TIME=$(date +%s)
 
-while IFS=$'\t' read -r NAME SIZE SEEDERS FILENAME MAGNET; do
-    # Skip non-data lines (info messages from stderr)
-    [ -z "$MAGNET" ] && continue
+aria2c \
+    --dir="$OUTPUT_DIR" \
+    --input-file="$INPUT_FILE" \
+    --seed-time="$SEED_TIME" \
+    --max-concurrent-downloads=10 \
+    --max-connection-per-server="$MAX_CONNECTIONS" \
+    --split=8 \
+    --min-split-size=10M \
+    --bt-tracker="udp://tracker.opentrackr.org:1337/announce,udp://tracker.openbittorrent.com:6969/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce,udp://explodie.org:6969/announce" \
+    --file-allocation=falloc \
+    --console-log-level=notice \
+    --summary-interval=10 \
+    --bt-enable-lpd=true \
+    --enable-dht=true \
+    --enable-peer-exchange=true \
+    --bt-max-peers=100 \
+    --human-readable=true \
+    --show-console-readout=true \
+    || {
+        echo ""
+        echo "WARNING: aria2c exited with an error. Some downloads may have failed."
+        echo ""
+    }
 
-    COMPLETED=$((COMPLETED + 1))
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "[$COMPLETED/$TOTAL_COUNT] Downloading: $NAME"
-    echo "  Size: ${SIZE} GB | Seeders: $SEEDERS"
-    echo "  File: $FILENAME"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-
-    aria2c \
-        --dir="$OUTPUT_DIR" \
-        --seed-time="$SEED_TIME" \
-        --max-connection-per-server="$MAX_CONNECTIONS" \
-        --split=8 \
-        --min-split-size=10M \
-        --bt-tracker="udp://tracker.opentrackr.org:1337/announce,udp://tracker.openbittorrent.com:6969/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce,udp://explodie.org:6969/announce" \
-        --file-allocation=falloc \
-        --console-log-level=notice \
-        --summary-interval=10 \
-        --bt-enable-lpd=true \
-        --enable-dht=true \
-        --enable-peer-exchange=true \
-        --bt-max-peers=100 \
-        --human-readable=true \
-        --show-console-readout=true \
-        "$MAGNET" || {
-            echo ""
-            echo "  WARNING: Download of $NAME may have failed. Continuing..."
-            echo ""
-        }
-
-    ELAPSED=$(( $(date +%s) - START_TIME ))
-    ELAPSED_MIN=$(( ELAPSED / 60 ))
-    echo ""
-    echo "  Completed $NAME (${ELAPSED_MIN}m elapsed total)"
-    echo ""
-
-done < "$MAGNET_FILE"
-
-rm -f "$MAGNET_FILE"
+rm -f "$INPUT_FILE"
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
