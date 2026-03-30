@@ -43,6 +43,11 @@ if (transport === "stdio") {
     await httpTransport.handleRequest(req, res, req.body);
   });
 
+  // GET /mcp — required for client discovery/verification
+  app.get("/mcp", (_req, res) => {
+    res.json({ name: "annas-archive", version: "1.0.0", status: "ok" });
+  });
+
   // Health check
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", transport: "http" });
