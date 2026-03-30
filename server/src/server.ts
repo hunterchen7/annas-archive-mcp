@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { search, getByMd5, getStats } from "./db.js";
-import { download } from "./download.js";
+import { getDownloadUrl } from "./download.js";
 
 export function createServer(secretKey?: string): McpServer {
   const server = new McpServer({
@@ -44,23 +44,23 @@ export function createServer(secretKey?: string): McpServer {
 
   server.tool(
     "download",
-    "Download a document by its MD5 hash using the Anna's Archive fast download API. The API key is provided via the X-Annas-Secret-Key header.",
+    "Get a download URL for a document by its MD5 hash using the Anna's Archive fast download API. Returns a direct download link the client can use.",
     {
       md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
-      filename: z.string().optional().describe("Desired filename for the download"),
     },
-    async ({ md5, filename }) => {
+    async ({ md5 }) => {
       const doc = await getByMd5(md5);
-      const result = await download(md5, secretKey || "", filename || (doc ? `${md5}.${doc.extension || "bin"}` : undefined));
+      const result = await getDownloadUrl(md5, secretKey || "");
 
       if (result.error) {
         return { content: [{ type: "text", text: `Download failed: ${result.error}` }], isError: true };
       }
 
-      let text = `Downloaded to: ${result.filePath}`;
+      let text = `Download URL: ${result.downloadUrl}`;
       if (doc) {
         text += `\nTitle: ${doc.title || "Unknown"}`;
         if (doc.author) text += `\nAuthor: ${doc.author}`;
+        if (doc.extension) text += `\nFormat: ${doc.extension}`;
       }
 
       return { content: [{ type: "text", text }] };
