@@ -6,7 +6,7 @@ import express from "express";
 const transport = process.env.TRANSPORT || "http";
 
 if (transport === "stdio") {
-  const server = createServer();
+  const server = createServer(process.env.ANNAS_SECRET_KEY || "");
   const stdioTransport = new StdioServerTransport();
   await server.connect(stdioTransport);
   console.error("MCP server running on stdio");
@@ -30,7 +30,8 @@ if (transport === "stdio") {
 
   // Streamable HTTP transport — fresh server per request (stateless)
   app.post("/mcp", async (req, res) => {
-    const server = createServer();
+    const secretKey = (req.headers["x-annas-secret-key"] as string) || "";
+    const server = createServer(secretKey);
     const httpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });

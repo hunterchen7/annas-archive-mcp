@@ -3,7 +3,7 @@ import { z } from "zod";
 import { search, getByMd5, getStats } from "./db.js";
 import { download } from "./download.js";
 
-export function createServer(): McpServer {
+export function createServer(secretKey?: string): McpServer {
   const server = new McpServer({
     name: "annas-archive",
     version: "1.0.0",
@@ -44,15 +44,14 @@ export function createServer(): McpServer {
 
   server.tool(
     "download",
-    "Download a document by its MD5 hash using the Anna's Archive fast download API. Requires the user's Anna's Archive membership API key.",
+    "Download a document by its MD5 hash using the Anna's Archive fast download API. The API key is provided via the X-Annas-Secret-Key header.",
     {
       md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
-      secret_key: z.string().describe("Your Anna's Archive membership API key"),
       filename: z.string().optional().describe("Desired filename for the download"),
     },
-    async ({ md5, secret_key, filename }) => {
+    async ({ md5, filename }) => {
       const doc = await getByMd5(md5);
-      const result = await download(md5, secret_key, filename || (doc ? `${md5}.${doc.extension || "bin"}` : undefined));
+      const result = await download(md5, secretKey || "", filename || (doc ? `${md5}.${doc.extension || "bin"}` : undefined));
 
       if (result.error) {
         return { content: [{ type: "text", text: `Download failed: ${result.error}` }], isError: true };
