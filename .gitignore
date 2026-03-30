@@ -4,3 +4,10 @@ dist/
 aac-data/
 downloads/
 *.log
+
+# Rust
+ingest/target/
+ingest/Cargo.lock
+
+# Claude local settings
+.claude/settings.local.json
