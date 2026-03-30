@@ -7,6 +7,7 @@ export function createServer(secretKey?: string): McpServer {
   const server = new McpServer({
     name: "annas-archive",
     version: "1.0.0",
+    description: "Search and download books, papers, and documents from a local Anna's Archive metadata index (20M+ records). Use search to find documents, then download to get a direct URL. Download the file locally with curl: curl -L -o <filename> '<url>'",
   });
 
   server.tool(
