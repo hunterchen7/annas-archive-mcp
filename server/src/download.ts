@@ -3,8 +3,7 @@ import path from "path";
 import https from "https";
 import http from "http";
 
-const SECRET_KEY = process.env.ANNAS_SECRET_KEY || "";
-const BASE_URL = process.env.ANNAS_BASE_URL || "annas-archive.gl";
+const DOMAINS = ["annas-archive.gl", "annas-archive.gd", "annas-archive.pk"];
 const DOWNLOAD_PATH = process.env.ANNAS_DOWNLOAD_PATH || "./downloads";
 
 interface FastDownloadResponse {
@@ -48,12 +47,10 @@ function downloadFile(url: string, dest: string): Promise<void> {
   });
 }
 
-export async function download(md5: string, filename?: string): Promise<{ filePath: string; error?: string }> {
-  if (!SECRET_KEY) {
-    return { filePath: "", error: "ANNAS_SECRET_KEY not configured" };
+export async function download(md5: string, secretKey: string, filename?: string): Promise<{ filePath: string; error?: string }> {
+  if (!secretKey) {
+    return { filePath: "", error: "No secret_key provided. Pass your Anna's Archive membership API key." };
   }
-
-  const apiUrl = `https://${BASE_URL}/dyn/api/fast_download.json?md5=${md5}&key=${SECRET_KEY}`;
 
   // Check cache first
   const subdir = md5.slice(0, 2);
@@ -66,12 +63,22 @@ export async function download(md5: string, filename?: string): Promise<{ filePa
     return { filePath: path.join(cacheDir, existingFiles[0]) };
   }
 
-  let resp: FastDownloadResponse;
-  try {
-    const body = await fetch(apiUrl);
-    resp = JSON.parse(body);
-  } catch (e) {
-    return { filePath: "", error: `API request failed: ${e}` };
+  // Try each domain until one works
+  let resp: FastDownloadResponse | undefined;
+  let lastError = "";
+  for (const domain of DOMAINS) {
+    const apiUrl = `https://${domain}/dyn/api/fast_download.json?md5=${md5}&key=${secretKey}`;
+    try {
+      const body = await fetch(apiUrl);
+      resp = JSON.parse(body);
+      break;
+    } catch (e) {
+      lastError = `${e}`;
+    }
+  }
+
+  if (!resp) {
+    return { filePath: "", error: `All domains failed. Last error: ${lastError}` };
   }
 
   if (resp.error) {
