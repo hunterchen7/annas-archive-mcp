@@ -44,7 +44,7 @@ export function createServer(secretKey?: string): McpServer {
 
   server.tool(
     "download",
-    "Get a download URL for a document by its MD5 hash using the Anna's Archive fast download API. Returns a direct download link the client can use.",
+    "Get a direct download URL for a document by its MD5 hash. Returns a temporary download link. To download the file locally, use the returned URL with curl or wget (e.g. `curl -L -o filename.epub '<url>'`). Always present the URL as a clickable markdown link to the user.",
     {
       md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
     },
