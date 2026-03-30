@@ -4,9 +4,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express from "express";
 
 const transport = process.env.TRANSPORT || "http";
-const server = createServer();
 
 if (transport === "stdio") {
+  const server = createServer();
   const stdioTransport = new StdioServerTransport();
   await server.connect(stdioTransport);
   console.error("MCP server running on stdio");
@@ -28,8 +28,9 @@ if (transport === "stdio") {
     });
   }
 
-  // Streamable HTTP transport
+  // Streamable HTTP transport — fresh server per request (stateless)
   app.post("/mcp", async (req, res) => {
+    const server = createServer();
     const httpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
