@@ -59,11 +59,10 @@ services:
 
   tunnel:
     image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate --url http://mcp-server:3001
+    restart: unless-stopped
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - mcp-server
-    profiles:
-      - tunnel
 
   download:
     build: ./downloader
