@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: annas
+      POSTGRES_USER: annas
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-annas}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./ingest/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    ports:
+      - "5432:5432"
+    shm_size: 256mb
+    command: >
+      postgres
+        -c shared_buffers=4GB
+        -c effective_cache_size=8GB
+        -c work_mem=256MB
+        -c maintenance_work_mem=1GB
+        -c max_wal_size=2GB
+        -c checkpoint_completion_target=0.9
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=200
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U annas"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mcp-server:
+    build: ./server
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgresql://annas:${POSTGRES_PASSWORD:-annas}@postgres:5432/annas
+      ANNAS_SECRET_KEY: ${ANNAS_SECRET_KEY:-}
+      ANNAS_DOWNLOAD_PATH: /data/downloads
+      ANNAS_BASE_URL: ${ANNAS_BASE_URL:-annas-archive.li}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      TRANSPORT: ${TRANSPORT:-http}
+      PORT: "3001"
+    volumes:
+      - downloads:/data/downloads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ingest:
+    build: ./ingest
+    environment:
+      DATABASE_URL: postgresql://annas:${POSTGRES_PASSWORD:-annas}@postgres:5432/annas
+    volumes:
+      - ${AAC_DATA_PATH:-./aac-data}:/data/aac:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - ingest
+
+volumes:
+  pgdata:
+  downloads:
