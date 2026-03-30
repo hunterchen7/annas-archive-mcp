@@ -4,7 +4,7 @@ import https from "https";
 import http from "http";
 
 const SECRET_KEY = process.env.ANNAS_SECRET_KEY || "";
-const BASE_URL = process.env.ANNAS_BASE_URL || "annas-archive.li";
+const BASE_URL = process.env.ANNAS_BASE_URL || "annas-archive.gl";
 const DOWNLOAD_PATH = process.env.ANNAS_DOWNLOAD_PATH || "./downloads";
 
 interface FastDownloadResponse {
