@@ -23,7 +23,7 @@ mkdir -p "$OUTPUT_DIR"
 # Fetch torrents.json with fallback domains
 fetch_torrents() {
     for domain in "$ANNAS_BASE_URL" annas-archive.gl annas-archive.gd annas-archive.pk; do
-        echo "  Fetching torrent index from $domain..."
+        echo "  Fetching torrent index from $domain..." >&2
         local result
         result=$(curl -sL --connect-timeout 10 "https://$domain/dyn/torrents.json" 2>/dev/null || true)
         if [ -n "$result" ] && echo "$result" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
