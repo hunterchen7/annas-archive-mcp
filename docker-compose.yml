@@ -29,6 +29,7 @@ services:
 
   mcp-server:
     build: ./server
+    restart: unless-stopped
     ports:
       - "3001:3001"
     environment:
