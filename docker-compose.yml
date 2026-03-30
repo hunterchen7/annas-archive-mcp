@@ -57,6 +57,14 @@ services:
     profiles:
       - ingest
 
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://mcp-server:3001
+    depends_on:
+      - mcp-server
+    profiles:
+      - tunnel
+
   download:
     build: ./downloader
     environment:
