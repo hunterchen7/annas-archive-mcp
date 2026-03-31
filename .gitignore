@@ -11,3 +11,4 @@ ingest/Cargo.lock
 
 # Claude local settings
 .claude/settings.local.json
+annas-archive-metadata-server-plan.md

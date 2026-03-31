@@ -397,7 +397,7 @@ async fn worker(
                 stats.skipped.fetch_add(batch_len - inserted, Ordering::Relaxed);
             }
             Err(e) => {
-                eprintln!("    Worker {worker_id} batch error: {e}");
+                eprintln!("    Worker {worker_id} batch error: {e:?}");
                 stats.skipped.fetch_add(batch_len, Ordering::Relaxed);
             }
         }
