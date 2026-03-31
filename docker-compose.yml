@@ -34,8 +34,7 @@ services:
       - "3001:3001"
     environment:
       DATABASE_URL: postgresql://annas:${POSTGRES_PASSWORD:-annas}@postgres:5432/annas
-      ANNAS_DOWNLOAD_PATH: /data/downloads
-      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      RATE_LIMIT: ${RATE_LIMIT:-60}
       TRANSPORT: ${TRANSPORT:-http}
       PORT: "3001"
     volumes:

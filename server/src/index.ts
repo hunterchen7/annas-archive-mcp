@@ -2,6 +2,7 @@ import { createServer } from "./server.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
+import type { Request, Response, NextFunction } from "express";
 
 const transport = process.env.TRANSPORT || "http";
 
@@ -14,20 +15,44 @@ if (transport === "stdio") {
   const app = express();
   app.use(express.json());
 
-  const AUTH_TOKEN = process.env.AUTH_TOKEN;
+  // Rate limiting — per IP, in memory
+  const RATE_WINDOW_MS = 60_000; // 1 minute
+  const RATE_MAX = parseInt(process.env.RATE_LIMIT || "60", 10); // requests per window
+  const hits = new Map<string, { count: number; resetAt: number }>();
 
-  // Auth middleware — supports both header and query param
-  if (AUTH_TOKEN) {
-    app.use("/mcp", (req, res, next) => {
-      const auth = req.headers.authorization;
-      const queryToken = req.query.token as string | undefined;
-      if (auth === `Bearer ${AUTH_TOKEN}` || queryToken === AUTH_TOKEN) {
-        next();
-        return;
-      }
-      res.status(401).json({ error: "Unauthorized" });
-    });
+  // Clean up stale entries every 5 minutes
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, entry] of hits) {
+      if (now > entry.resetAt) hits.delete(ip);
+    }
+  }, 300_000);
+
+  function rateLimit(req: Request, res: Response, next: NextFunction) {
+    const ip = req.ip || req.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    let entry = hits.get(ip);
+
+    if (!entry || now > entry.resetAt) {
+      entry = { count: 0, resetAt: now + RATE_WINDOW_MS };
+      hits.set(ip, entry);
+    }
+
+    entry.count++;
+
+    res.setHeader("X-RateLimit-Limit", RATE_MAX);
+    res.setHeader("X-RateLimit-Remaining", Math.max(0, RATE_MAX - entry.count));
+    res.setHeader("X-RateLimit-Reset", Math.ceil(entry.resetAt / 1000));
+
+    if (entry.count > RATE_MAX) {
+      res.status(429).json({ error: "Rate limit exceeded. Try again in a minute." });
+      return;
+    }
+
+    next();
   }
+
+  app.use("/mcp", rateLimit);
 
   // Streamable HTTP transport — fresh server per request (stateless)
   app.post("/mcp", async (req, res) => {
