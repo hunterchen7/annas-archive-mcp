@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     djvulibre-bin \
     unzip \
+    calibre \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

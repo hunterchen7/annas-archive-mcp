@@ -29,10 +29,14 @@ interface ReadResult {
 
 // Magic bytes for format detection
 function detectFormat(filePath: string): string {
-  const buf = Buffer.alloc(16);
+  const size = fs.statSync(filePath).size;
+  const readSize = Math.min(size, 128);
+  const buf = Buffer.alloc(readSize);
   const fd = fs.openSync(filePath, "r");
-  fs.readSync(fd, buf, 0, 16, 0);
+  fs.readSync(fd, buf, 0, readSize, 0);
   fs.closeSync(fd);
+
+  const head16 = buf.slice(0, 16).toString("ascii");
 
   // PDF: starts with %PDF
   if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) {
@@ -40,12 +44,10 @@ function detectFormat(filePath: string): string {
   }
   // ZIP-based (EPUB, DOCX, etc): starts with PK\x03\x04
   if (buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
-    // Check if it's an EPUB by looking for mimetype file
     try {
       const output = execSync(`unzip -p "${filePath}" mimetype 2>/dev/null || true`, { encoding: "utf-8" });
       if (output.includes("application/epub")) return "epub";
     } catch { /* not epub */ }
-    // Check for DOCX
     try {
       const output = execSync(`unzip -l "${filePath}" 2>/dev/null | head -20 || true`, { encoding: "utf-8" });
       if (output.includes("word/document.xml")) return "docx";
@@ -57,20 +59,33 @@ function detectFormat(filePath: string): string {
   if (buf[0] === 0x41 && buf[1] === 0x54 && buf[2] === 0x26 && buf[3] === 0x54) {
     return "djvu";
   }
-  // MOBI/AZW: starts with "BOOKMOBI"
-  if (buf.slice(0, 8).toString("ascii") === "BOOKMOBI") {
+  // MOBI/AZW: "BOOKMOBI" can be at offset 60 (after PDB header with title)
+  // or at offset 0 in some files
+  const fullStr = buf.toString("ascii");
+  if (fullStr.includes("BOOKMOBI")) {
     return "mobi";
   }
+  // Also check PDB header: if bytes 60-67 contain "MOBI" or "BOOK"
+  if (readSize >= 68) {
+    const pdbMagic = buf.slice(60, 68).toString("ascii");
+    if (pdbMagic.includes("BOOK") || pdbMagic.includes("MOBI")) {
+      return "mobi";
+    }
+  }
   // FB2 (XML-based): starts with <?xml or <FictionBook
-  const head = buf.toString("ascii");
-  if (head.startsWith("<?xml") || head.startsWith("<Fic")) {
+  if (head16.startsWith("<?xml") || head16.startsWith("<Fic")) {
+    // Could be FB2 or other XML — check deeper
+    try {
+      const sample = fs.readFileSync(filePath, { encoding: "utf-8", flag: "r" }).slice(0, 500);
+      if (sample.includes("FictionBook")) return "fb2";
+    } catch { /* not text */ }
     return "fb2";
   }
   // RTF: starts with {\rtf
-  if (head.startsWith("{\\rtf")) {
+  if (head16.startsWith("{\\rtf")) {
     return "rtf";
   }
-  // Plain text fallback — check if mostly printable ASCII/UTF8
+  // Plain text fallback
   try {
     const sample = fs.readFileSync(filePath, { encoding: "utf-8", flag: "r" }).slice(0, 1000);
     if (sample.length > 0) return "txt";
