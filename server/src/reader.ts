@@ -188,71 +188,39 @@ function extractDjvu(filePath: string): string {
   });
 }
 
-function extractMobi(filePath: string): string {
-  // Try converting mobi to epub first via calibre's ebook-convert if available
+// Universal fallback: calibre's ebook-convert handles MOBI, AZW, AZW3, FB2, LIT, PDB, CBR, CBZ, DOCX, RTF, etc.
+function extractWithCalibre(filePath: string): string {
+  const tmpTxt = `/tmp/calibre_${Date.now()}.txt`;
   try {
-    const tmpEpub = `/tmp/mobi_${Date.now()}.epub`;
-    execSync(`ebook-convert "${filePath}" "${tmpEpub}" 2>/dev/null`, { timeout: 60000 });
-    const text = extractEpub(tmpEpub);
-    fs.unlinkSync(tmpEpub);
+    execSync(`ebook-convert "${filePath}" "${tmpTxt}" 2>/dev/null`, {
+      timeout: 120000,
+      maxBuffer: 100 * 1024 * 1024,
+    });
+    const text = fs.readFileSync(tmpTxt, "utf-8");
+    fs.unlinkSync(tmpTxt);
     return text;
   } catch {
-    // Fallback: try extracting raw text with strings
-    return execSync(`strings "${filePath}" | head -10000`, {
-      maxBuffer: 100 * 1024 * 1024,
-      encoding: "utf-8",
-    });
+    try { fs.unlinkSync(tmpTxt); } catch { /* ignore */ }
+    throw new Error("ebook-convert failed");
   }
-}
-
-function extractDocx(filePath: string): string {
-  try {
-    const tmpDir = `/tmp/docx_${Date.now()}`;
-    execSync(`mkdir -p "${tmpDir}" && unzip -o -q "${filePath}" -d "${tmpDir}" 2>/dev/null || true`);
-    const xmlPath = path.join(tmpDir, "word/document.xml");
-    if (fs.existsSync(xmlPath)) {
-      const xml = fs.readFileSync(xmlPath, "utf-8");
-      const text = xml
-        .replace(/<w:br[^>]*\/>/gi, "\n")
-        .replace(/<\/w:p>/gi, "\n\n")
-        .replace(/<[^>]+>/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-      execSync(`rm -rf "${tmpDir}"`);
-      return text;
-    }
-    execSync(`rm -rf "${tmpDir}"`);
-    return "[No document.xml found in DOCX]";
-  } catch {
-    return "[Failed to extract DOCX text]";
-  }
-}
-
-function extractFb2(filePath: string): string {
-  const xml = fs.readFileSync(filePath, "utf-8");
-  return xml
-    .replace(/<binary[^>]*>[\s\S]*?<\/binary>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function extractText(filePath: string, format: string): string {
-  switch (format) {
-    case "pdf": return extractPdf(filePath);
-    case "epub": return extractEpub(filePath);
-    case "djvu": return extractDjvu(filePath);
-    case "mobi": return extractMobi(filePath);
-    case "docx": return extractDocx(filePath);
-    case "fb2": return extractFb2(filePath);
-    case "rtf":
-    case "txt": return fs.readFileSync(filePath, "utf-8");
-    default:
-      // Try each extractor until one works
-      for (const fn of [extractPdf, extractEpub]) {
-        try { const t = fn(filePath); if (t.length > 100) return t; } catch { /* next */ }
-      }
-      return fs.readFileSync(filePath, "utf-8");
+  // PDF: pdftotext is best
+  if (format === "pdf") return extractPdf(filePath);
+  // EPUB: direct HTML extraction is faster than calibre
+  if (format === "epub") return extractEpub(filePath);
+  // DJVU: dedicated tool
+  if (format === "djvu") return extractDjvu(filePath);
+  // Plain text: just read it
+  if (format === "txt") return fs.readFileSync(filePath, "utf-8");
+  // Everything else: calibre handles MOBI, AZW, AZW3, FB2, LIT, PDB, CBR, CBZ, DOCX, RTF, etc.
+  try {
+    return extractWithCalibre(filePath);
+  } catch {
+    // Last resort: try pdftotext, then raw read
+    try { return extractPdf(filePath); } catch { /* not pdf */ }
+    return fs.readFileSync(filePath, "utf-8");
   }
 }
 
