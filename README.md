@@ -2,6 +2,8 @@
 
 A self-hosted [MCP](https://modelcontextprotocol.io) server that indexes Anna's Archive metadata into a local PostgreSQL database. Search books, papers, and documents by title, author, DOI, or ISBN with full-text search, diacritic-insensitive matching, and MD5 deduplication. Get direct download URLs via the Anna's Archive API.
 
+This project only indexes publicly available metadata. It does not host or distribute any copyrighted content. Downloading files **requires your own [Anna's Archive membership](https://annas-archive.gl/account) API key**.
+
 Works with Claude Code, Claude Desktop, claude.ai, and any MCP-compatible client.
 
 ```
@@ -23,7 +25,7 @@ Works with Claude Code, Claude Desktop, claude.ai, and any MCP-compatible client
 | Tool       | Description                                                                                                                        |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `search`   | Query by title, author, DOI, ISBN, or keywords. Returns metadata + MD5 hashes. Supports language and format filters.               |
-| `download` | Get a direct download URL for a document by MD5 hash. Requires an Anna's Archive membership API key (provided via client headers). |
+| `download` | Get a direct download URL for a document by MD5 hash. **Requires your own Anna's Archive membership API key** (provided via client headers). |
 | `stats`    | Index statistics — total records and breakdown by source collection.                                                               |
 
 ## Quick Start
