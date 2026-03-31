@@ -267,8 +267,16 @@ async fn insert_batch(client: &Client, batch: &[Row], worker_id: usize) -> Resul
     writer.as_mut().finish().await?;
 
     // Move from temp to real table, skipping duplicates
+    // Cast date_added from TEXT to DATE
+    let select_cols = COLUMNS.iter().map(|&c| {
+        if c == "date_added" {
+            format!("date_added::date")
+        } else {
+            c.to_string()
+        }
+    }).collect::<Vec<_>>().join(",");
     let inserted = client.execute(&format!(
-        "INSERT INTO documents ({cols}) SELECT {cols} FROM {tmp} ON CONFLICT (aacid) DO NOTHING"
+        "INSERT INTO documents ({cols}) SELECT {select_cols} FROM {tmp} ON CONFLICT (aacid) DO NOTHING"
     ), &[]).await?;
 
     Ok(inserted)
