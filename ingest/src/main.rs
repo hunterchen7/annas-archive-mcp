@@ -46,7 +46,7 @@ struct Args {
     )]
     db: String,
 
-    #[arg(long, default_value = "4", help = "Number of parallel DB workers")]
+    #[arg(long, default_value = "8", help = "Number of parallel DB workers")]
     workers: usize,
 }
 
@@ -119,8 +119,46 @@ fn extract_isbn(meta: &Value) -> Option<String> {
     None
 }
 
+/// Extract a human-readable title from a filename like
+/// "vine-deloria-jr-custer-died-for-your-sins-an-indian-manifesto.pdf"
+fn title_from_filename(meta: &Value) -> Option<String> {
+    let filepath = get_str(meta, &["filename", "filepath"])?;
+    // Get just the filename, strip path prefix and extension
+    let name = filepath.rsplit('/').next().unwrap_or(filepath);
+    let name = name.rsplit('.').last().unwrap_or(name);
+    if name.is_empty() || name.starts_with("part_") {
+        return None;
+    }
+    // Replace hyphens and underscores with spaces, title case
+    let title: String = name
+        .replace('-', " ")
+        .replace('_', " ")
+        .split_whitespace()
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => {
+                    let upper: String = c.to_uppercase().collect();
+                    upper + chars.as_str()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.len() < 3 {
+        return None;
+    }
+    truncate(&title, 4000)
+}
+
 fn extract_metadata(record: &Value, source: &str) -> Option<Row> {
     let meta = record.get("metadata")?;
+
+    // Skip records flagged as duplicates by Anna's Archive
+    if let Some(Value::Bool(true)) = meta.get("deleted_as_duplicate") {
+        return None;
+    }
 
     let md5_raw = get_str(meta, &["md5_reported", "md5", "md5_hash"])?;
     let md5: String = md5_raw.trim().to_lowercase();
@@ -132,6 +170,7 @@ fn extract_metadata(record: &Value, source: &str) -> Option<Row> {
         .get("zlibrary_id")
         .or_else(|| meta.get("libgen_id"))
         .or_else(|| meta.get("id"))
+        .or_else(|| meta.get("primary_id"))
         .or_else(|| meta.get("doi"))
         .and_then(|v| match v {
             Value::String(s) if !s.is_empty() => Some(s.clone()),
@@ -174,22 +213,40 @@ fn extract_metadata(record: &Value, source: &str) -> Option<Row> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // Title: try metadata fields first, fall back to filename
+    let title = get_str(meta, &["title", "title_best"])
+        .and_then(|s| truncate(s, 4000))
+        .or_else(|| title_from_filename(meta));
+
+    // Extension: try metadata fields, fall back to file_type
+    let extension = get_str(meta, &["extension", "extension_best"])
+        .or_else(|| get_str(meta, &["file_type"]))
+        .and_then(|s| truncate(s, 20));
+
+    // Pages: try metadata fields, fall back to total_pages
+    let pages = meta.get("pages")
+        .and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => truncate(s, 50),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .or_else(|| meta.get("total_pages").and_then(|v| match v {
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }));
+
     Some(Row {
         source: source.to_string(),
         source_id,
         md5,
-        title: get_str(meta, &["title", "title_best"]).and_then(|s| truncate(s, 4000)),
+        title,
         author: get_str(meta, &["author", "author_best"]).and_then(|s| truncate(s, 2000)),
         publisher: get_str(meta, &["publisher"]).and_then(|s| truncate(s, 1000)),
         language: get_str(meta, &["language", "language_best"]).and_then(|s| truncate(s, 100)),
         year,
-        extension: get_str(meta, &["extension", "extension_best"]).and_then(|s| truncate(s, 20)),
+        extension,
         filesize,
-        pages: meta.get("pages").and_then(|v| match v {
-            Value::String(s) if !s.is_empty() => truncate(s, 50),
-            Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        }),
+        pages,
         series: get_str(meta, &["series"]).and_then(|s| truncate(s, 1000)),
         edition: get_str(meta, &["edition"]).and_then(|s| truncate(s, 500)),
         doi: get_str(meta, &["doi"]).and_then(|s| truncate(s, 200)),
@@ -266,8 +323,8 @@ async fn insert_batch(client: &Client, batch: &[Row], worker_id: usize) -> Resul
     writer.as_mut().send(bytes::Bytes::copy_from_slice(&buf)).await?;
     writer.as_mut().finish().await?;
 
-    // Move from temp to real table, skipping duplicates
-    // Cast date_added from TEXT to DATE
+    // Move from temp to real table
+    // Deduplicate by MD5: on conflict, keep the record with more metadata (longer title)
     let select_cols = COLUMNS.iter().map(|&c| {
         if c == "date_added" {
             format!("date_added::date")
@@ -275,8 +332,35 @@ async fn insert_batch(client: &Client, batch: &[Row], worker_id: usize) -> Resul
             c.to_string()
         }
     }).collect::<Vec<_>>().join(",");
+    // Metadata completeness score: count non-null fields
+    let score = |prefix: &str| format!(
+        "({p}.title IS NOT NULL)::int + ({p}.author IS NOT NULL)::int + \
+         ({p}.year IS NOT NULL)::int + ({p}.language IS NOT NULL)::int + \
+         ({p}.isbn IS NOT NULL)::int + ({p}.doi IS NOT NULL)::int + \
+         ({p}.description IS NOT NULL)::int + ({p}.publisher IS NOT NULL)::int",
+        p = prefix
+    );
+    let new_score = score("EXCLUDED");
+    let old_score = score("documents");
+
     let inserted = client.execute(&format!(
-        "INSERT INTO documents ({cols}) SELECT {select_cols} FROM {tmp} ON CONFLICT (aacid) DO NOTHING"
+        "INSERT INTO documents ({cols}) SELECT {select_cols} FROM {tmp} \
+         ON CONFLICT (md5) DO UPDATE SET \
+           source = CASE WHEN ({new_score}) >= ({old_score}) THEN EXCLUDED.source ELSE documents.source END, \
+           source_id = CASE WHEN ({new_score}) >= ({old_score}) THEN EXCLUDED.source_id ELSE documents.source_id END, \
+           title = CASE WHEN ({new_score}) >= ({old_score}) THEN EXCLUDED.title ELSE documents.title END, \
+           author = CASE WHEN ({new_score}) >= ({old_score}) THEN EXCLUDED.author ELSE documents.author END, \
+           publisher = COALESCE(EXCLUDED.publisher, documents.publisher), \
+           language = COALESCE(EXCLUDED.language, documents.language), \
+           year = COALESCE(EXCLUDED.year, documents.year), \
+           extension = COALESCE(EXCLUDED.extension, documents.extension), \
+           filesize = COALESCE(EXCLUDED.filesize, documents.filesize), \
+           pages = COALESCE(EXCLUDED.pages, documents.pages), \
+           series = COALESCE(EXCLUDED.series, documents.series), \
+           edition = COALESCE(EXCLUDED.edition, documents.edition), \
+           doi = COALESCE(EXCLUDED.doi, documents.doi), \
+           isbn = COALESCE(EXCLUDED.isbn, documents.isbn), \
+           description = COALESCE(EXCLUDED.description, documents.description)"
     ), &[]).await?;
 
     Ok(inserted)

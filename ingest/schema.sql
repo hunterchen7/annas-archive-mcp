@@ -10,10 +10,9 @@ EXCEPTION WHEN unique_violation THEN NULL;
 END $$;
 
 CREATE TABLE IF NOT EXISTS documents (
-    id              BIGSERIAL PRIMARY KEY,
+    md5             CHAR(32) PRIMARY KEY,
     source          TEXT NOT NULL,
     source_id       TEXT,
-    md5             CHAR(32) NOT NULL,
     title           TEXT,
     author          TEXT,
     publisher       TEXT,
@@ -27,7 +26,7 @@ CREATE TABLE IF NOT EXISTS documents (
     doi             TEXT,
     isbn            TEXT,
     description     TEXT,
-    aacid           TEXT UNIQUE,
+    aacid           TEXT,
     date_added      DATE,
     search_vector   TSVECTOR GENERATED ALWAYS AS (
         setweight(to_tsvector('english_unaccent', coalesce(title, '')), 'A') ||
@@ -37,7 +36,6 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_search ON documents USING GIN (search_vector);
-CREATE INDEX IF NOT EXISTS idx_documents_md5 ON documents (md5);
 CREATE INDEX IF NOT EXISTS idx_documents_title_trgm ON documents USING GIN (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_documents_author_trgm ON documents USING GIN (author gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_documents_doi ON documents (doi) WHERE doi IS NOT NULL;
