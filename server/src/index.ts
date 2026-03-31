@@ -13,6 +13,7 @@ if (transport === "stdio") {
   console.error("MCP server running on stdio");
 } else {
   const app = express();
+  app.set("trust proxy", true);
   app.use(express.json());
 
   // Rate limiting — per IP, in memory
@@ -28,8 +29,16 @@ if (transport === "stdio") {
     }
   }, 300_000);
 
+  function getClientIp(req: Request): string {
+    // CF-Connecting-IP is set by Cloudflare to the real client IP
+    return (req.headers["cf-connecting-ip"] as string) ||
+      req.ip ||
+      req.socket.remoteAddress ||
+      "unknown";
+  }
+
   function rateLimit(req: Request, res: Response, next: NextFunction) {
-    const ip = req.ip || req.socket.remoteAddress || "unknown";
+    const ip = getClientIp(req);
     const now = Date.now();
     let entry = hits.get(ip);
 
