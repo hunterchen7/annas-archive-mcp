@@ -84,23 +84,27 @@ export async function search(opts: SearchOptions): Promise<Document[]> {
   let result = await pool.query(sql, params);
 
   // Trigram fallback for text queries with no FTS results
+  // Only for short queries (likely typos); require high similarity to avoid junk matches
   if (queryType === "text" && result.rows.length === 0) {
-    const trigramParams: (string | number)[] = [opts.query];
-    let triIdx = 2;
-    let trigramSql = `SELECT md5, title, author, publisher, language, year, extension, filesize, source, doi, isbn, pages, series, description
-                      FROM documents
-                      WHERE title % $1`;
-    if (opts.language) {
-      trigramSql += ` AND language = $${triIdx++}`;
-      trigramParams.push(opts.language);
+    const words = opts.query.trim().split(/\s+/);
+    if (words.length <= 3) {
+      const trigramParams: (string | number)[] = [opts.query];
+      let triIdx = 2;
+      let trigramSql = `SELECT md5, title, author, publisher, language, year, extension, filesize, source, doi, isbn, pages, series, description
+                        FROM documents
+                        WHERE similarity(title, $1) > 0.3 OR similarity(author, $1) > 0.3`;
+      if (opts.language) {
+        trigramSql += ` AND language = $${triIdx++}`;
+        trigramParams.push(opts.language);
+      }
+      if (opts.format) {
+        trigramSql += ` AND extension = $${triIdx++}`;
+        trigramParams.push(opts.format);
+      }
+      trigramSql += ` ORDER BY greatest(similarity(title, $1), similarity(author, $1)) DESC LIMIT $${triIdx++}`;
+      trigramParams.push(limit);
+      result = await pool.query(trigramSql, trigramParams);
     }
-    if (opts.format) {
-      trigramSql += ` AND extension = $${triIdx++}`;
-      trigramParams.push(opts.format);
-    }
-    trigramSql += ` ORDER BY similarity(title, $1) DESC LIMIT $${triIdx++}`;
-    trigramParams.push(limit);
-    result = await pool.query(trigramSql, trigramParams);
   }
 
   return result.rows;
