@@ -1,4 +1,13 @@
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+
+-- Create a text search config that strips diacritics
+DO $$ BEGIN
+  CREATE TEXT SEARCH CONFIGURATION english_unaccent (COPY = english);
+  ALTER TEXT SEARCH CONFIGURATION english_unaccent
+    ALTER MAPPING FOR hword, hword_part, word WITH unaccent, english_stem;
+EXCEPTION WHEN unique_violation THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS documents (
     id              BIGSERIAL PRIMARY KEY,
@@ -21,9 +30,9 @@ CREATE TABLE IF NOT EXISTS documents (
     aacid           TEXT UNIQUE,
     date_added      DATE,
     search_vector   TSVECTOR GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(author, '')), 'B') ||
-        setweight(to_tsvector('english', coalesce(publisher, '')), 'C')
+        setweight(to_tsvector('english_unaccent', coalesce(title, '')), 'A') ||
+        setweight(to_tsvector('english_unaccent', coalesce(author, '')), 'B') ||
+        setweight(to_tsvector('english_unaccent', coalesce(publisher, '')), 'C')
     ) STORED
 );
 

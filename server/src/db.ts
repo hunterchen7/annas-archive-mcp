@@ -59,9 +59,9 @@ export async function search(opts: SearchOptions): Promise<Document[]> {
   } else {
     // Full-text search with trigram fallback
     sql = `SELECT md5, title, author, publisher, language, year, extension, filesize, source, doi, isbn, pages, series, description,
-             ts_rank(search_vector, plainto_tsquery('english', $${paramIdx})) AS rank
+             ts_rank(search_vector, plainto_tsquery('english_unaccent', $${paramIdx})) AS rank
            FROM documents
-           WHERE search_vector @@ plainto_tsquery('english', $${paramIdx++})`;
+           WHERE search_vector @@ plainto_tsquery('english_unaccent', $${paramIdx++})`;
     params.push(opts.query);
   }
 
