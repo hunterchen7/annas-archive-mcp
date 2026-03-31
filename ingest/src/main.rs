@@ -327,7 +327,8 @@ async fn insert_batch(client: &Client, batch: &[Row], worker_id: usize) -> Resul
     // Deduplicate by MD5: on conflict, keep the record with more metadata (longer title)
     let select_cols = COLUMNS.iter().map(|&c| {
         if c == "date_added" {
-            format!("date_added::date")
+            // Try casting to date, NULL on failure
+            format!("CASE WHEN date_added ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}' THEN date_added::date ELSE NULL END")
         } else {
             c.to_string()
         }
