@@ -205,6 +205,16 @@ Features:
 | RAM (recommended)  | 8 GB              | 16+ GB             |
 | Ingestion time     | ~15 min           | ~1 hour            |
 
+## Disclaimer
+
+This project provides a search interface over publicly available metadata published by Anna's Archive. It does **not** host, distribute, or store any copyrighted content.
+
+- **Metadata only** — the database contains bibliographic information (titles, authors, ISBNs, etc.), not the actual files.
+- **Downloads** require the user to provide their own Anna's Archive membership API key. This project does not provide, share, or store API keys.
+- **No affiliation** — this project is not affiliated with, endorsed by, or connected to Anna's Archive.
+- **User responsibility** — users are solely responsible for how they use this tool and for complying with all applicable laws in their jurisdiction.
+- **No warranty** — this software is provided as-is with no guarantees of any kind.
+
 ## License
 
 MIT
