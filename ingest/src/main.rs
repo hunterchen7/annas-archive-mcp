@@ -2,7 +2,10 @@ use clap::Parser;
 use futures_util::SinkExt;
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::mpsc;
 use tokio_postgres::{Client, NoTls};
 
 const BATCH_SIZE: usize = 10_000;
@@ -42,6 +45,9 @@ struct Args {
         default_value = "postgresql://annas:annas@localhost:5432/annas"
     )]
     db: String,
+
+    #[arg(long, default_value = "4", help = "Number of parallel DB workers")]
+    workers: usize,
 }
 
 struct Row {
@@ -232,11 +238,20 @@ fn row_to_copy_line(row: &Row) -> String {
     .join("\t")
 }
 
-async fn copy_batch(client: &Client, batch: &[Row]) -> Result<u64, Box<dyn std::error::Error>> {
+/// Insert a batch using a temp table + INSERT ... ON CONFLICT to handle dupes without failing COPY
+async fn insert_batch(client: &Client, batch: &[Row], worker_id: usize) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let tmp = format!("_tmp_ingest_{worker_id}");
     let cols = COLUMNS.join(",");
-    let stmt = format!("COPY documents ({cols}) FROM STDIN WITH (FORMAT text)");
 
-    let writer = client.copy_in(&stmt).await?;
+    // Create temp table (unlogged, no indexes)
+    client.execute(&format!(
+        "CREATE TEMP TABLE IF NOT EXISTS {tmp} (LIKE documents INCLUDING DEFAULTS) ON COMMIT DROP"
+    ), &[]).await?;
+    client.execute(&format!("TRUNCATE {tmp}"), &[]).await?;
+
+    // COPY into temp table (no unique constraints = no failures)
+    let copy_stmt = format!("COPY {tmp} ({cols}) FROM STDIN WITH (FORMAT text)");
+    let writer = client.copy_in(&copy_stmt).await?;
     let mut writer = std::pin::pin!(writer);
 
     let mut buf = Vec::with_capacity(batch.len() * 512);
@@ -244,145 +259,52 @@ async fn copy_batch(client: &Client, batch: &[Row]) -> Result<u64, Box<dyn std::
         buf.extend_from_slice(row_to_copy_line(row).as_bytes());
         buf.push(b'\n');
     }
-
     writer.as_mut().send(bytes::Bytes::copy_from_slice(&buf)).await?;
-    let rows = writer.as_mut().finish().await?;
-    Ok(rows)
+    writer.as_mut().finish().await?;
+
+    // Move from temp to real table, skipping duplicates
+    let inserted = client.execute(&format!(
+        "INSERT INTO documents ({cols}) SELECT {cols} FROM {tmp} ON CONFLICT (aacid) DO NOTHING"
+    ), &[]).await?;
+
+    Ok(inserted)
 }
 
-async fn insert_single(client: &Client, row: &Row) -> Result<(), tokio_postgres::Error> {
-    client
-        .execute(
-            "INSERT INTO documents (source,source_id,md5,title,author,publisher,\
-             language,year,extension,filesize,pages,series,edition,doi,isbn,\
-             description,aacid,date_added) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) \
-             ON CONFLICT (aacid) DO NOTHING",
-            &[
-                &row.source,
-                &row.source_id,
-                &row.md5,
-                &row.title,
-                &row.author,
-                &row.publisher,
-                &row.language,
-                &row.year,
-                &row.extension,
-                &row.filesize,
-                &row.pages,
-                &row.series,
-                &row.edition,
-                &row.doi,
-                &row.isbn,
-                &row.description,
-                &row.aacid,
-                &row.date_added,
-            ],
-        )
-        .await?;
-    Ok(())
+struct Stats {
+    ingested: AtomicU64,
+    skipped: AtomicU64,
 }
 
-async fn flush_batch(client: &Client, batch: &[Row]) -> (u64, u64) {
-    match copy_batch(client, batch).await {
-        Ok(_) => (batch.len() as u64, 0),
-        Err(e) => {
-            eprintln!("    COPY failed ({e}), falling back to individual inserts");
-            let mut ok = 0u64;
-            let mut fail = 0u64;
-            for row in batch {
-                match insert_single(client, row).await {
-                    Ok(_) => ok += 1,
-                    Err(_) => fail += 1,
-                }
-            }
-            (ok, fail)
+/// Worker task: receives batches from channel and inserts them
+async fn worker(
+    worker_id: usize,
+    db_url: String,
+    mut rx: mpsc::Receiver<Vec<Row>>,
+    stats: Arc<Stats>,
+) {
+    let (client, connection) = tokio_postgres::connect(&db_url, NoTls)
+        .await
+        .expect("Worker failed to connect to PostgreSQL");
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Worker {worker_id} connection error: {e}");
         }
-    }
-}
+    });
 
-async fn ingest_file(client: &Client, filepath: &str, source: &str) -> (u64, u64) {
-    let start = Instant::now();
-    let mut total_ingested: u64 = 0;
-    let mut total_skipped: u64 = 0;
-
-    eprintln!("  Ingesting: {filepath}");
-
-    let file = std::fs::File::open(filepath).expect("Failed to open file");
-    let decoder = zstd::Decoder::new(file).expect("Failed to create zstd decoder");
-    let reader = BufReader::with_capacity(1024 * 1024, decoder);
-
-    let mut batch: Vec<Row> = Vec::with_capacity(BATCH_SIZE);
-
-    for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => {
-                total_skipped += 1;
-                continue;
+    while let Some(batch) = rx.recv().await {
+        let batch_len = batch.len() as u64;
+        match insert_batch(&client, &batch, worker_id).await {
+            Ok(inserted) => {
+                stats.ingested.fetch_add(inserted, Ordering::Relaxed);
+                stats.skipped.fetch_add(batch_len - inserted, Ordering::Relaxed);
             }
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let record: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => {
-                total_skipped += 1;
-                continue;
-            }
-        };
-
-        match extract_metadata(&record, source) {
-            Some(row) => batch.push(row),
-            None => {
-                total_skipped += 1;
-                continue;
-            }
-        }
-
-        if batch.len() >= BATCH_SIZE {
-            let (ok, fail) = flush_batch(client, &batch).await;
-            total_ingested += ok;
-            total_skipped += fail;
-            batch.clear();
-
-            if total_ingested % 100_000 == 0 && total_ingested > 0 {
-                let elapsed = start.elapsed().as_secs_f64();
-                let rate = total_ingested as f64 / elapsed;
-                eprintln!(
-                    "    {:>12} ingested | {:>8} skipped | {:.0} rec/s",
-                    fmt_num(total_ingested),
-                    fmt_num(total_skipped),
-                    rate
-                );
+            Err(e) => {
+                eprintln!("    Worker {worker_id} batch error: {e}");
+                stats.skipped.fetch_add(batch_len, Ordering::Relaxed);
             }
         }
     }
-
-    if !batch.is_empty() {
-        let (ok, fail) = flush_batch(client, &batch).await;
-        total_ingested += ok;
-        total_skipped += fail;
-    }
-
-    let elapsed = start.elapsed().as_secs_f64();
-    let rate = if elapsed > 0.0 {
-        total_ingested as f64 / elapsed
-    } else {
-        0.0
-    };
-    eprintln!(
-        "    Done: {} ingested, {} skipped in {:.1}s ({:.0} rec/s)",
-        fmt_num(total_ingested),
-        fmt_num(total_skipped),
-        elapsed,
-        rate
-    );
-
-    (total_ingested, total_skipped)
 }
 
 fn fmt_num(n: u64) -> String {
@@ -415,32 +337,114 @@ async fn main() {
 
     eprintln!("Source: {}", args.source);
     eprintln!("Files: {}", files.len());
+    eprintln!("Workers: {}", args.workers);
     eprintln!("Database: {db_display}");
     eprintln!();
 
-    let (client, connection) = tokio_postgres::connect(&args.db, NoTls)
-        .await
-        .expect("Failed to connect to PostgreSQL");
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("PostgreSQL connection error: {e}");
-        }
+    let stats = Arc::new(Stats {
+        ingested: AtomicU64::new(0),
+        skipped: AtomicU64::new(0),
     });
 
-    let mut grand_total: u64 = 0;
-    let mut grand_skipped: u64 = 0;
-
-    for filepath in &files {
-        let (ingested, skipped) = ingest_file(&client, filepath, &args.source).await;
-        grand_total += ingested;
-        grand_skipped += skipped;
+    // Spawn worker pool
+    let mut senders = Vec::new();
+    let mut handles = Vec::new();
+    for i in 0..args.workers {
+        let (tx, rx) = mpsc::channel::<Vec<Row>>(4);
+        let db_url = args.db.clone();
+        let stats = Arc::clone(&stats);
+        handles.push(tokio::spawn(worker(i, db_url, rx, stats)));
+        senders.push(tx);
     }
 
+    let start = Instant::now();
+    let mut batch: Vec<Row> = Vec::with_capacity(BATCH_SIZE);
+    let mut worker_idx = 0usize;
+    let mut lines_read: u64 = 0;
+
+    for filepath in &files {
+        eprintln!("  Ingesting: {filepath}");
+
+        let file = std::fs::File::open(filepath).expect("Failed to open file");
+        let decoder = zstd::Decoder::new(file).expect("Failed to create zstd decoder");
+        let reader = BufReader::with_capacity(1024 * 1024, decoder);
+
+        for line_result in reader.lines() {
+            let line = match line_result {
+                Ok(l) => l,
+                Err(_) => {
+                    stats.skipped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            };
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let record: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => {
+                    stats.skipped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            };
+
+            match extract_metadata(&record, &args.source) {
+                Some(row) => batch.push(row),
+                None => {
+                    stats.skipped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            }
+
+            if batch.len() >= BATCH_SIZE {
+                // Round-robin to workers
+                let _ = senders[worker_idx % args.workers]
+                    .send(std::mem::replace(&mut batch, Vec::with_capacity(BATCH_SIZE)))
+                    .await;
+                worker_idx += 1;
+            }
+
+            lines_read += 1;
+            if lines_read % 100_000 == 0 {
+                let ingested = stats.ingested.load(Ordering::Relaxed);
+                let skipped = stats.skipped.load(Ordering::Relaxed);
+                let elapsed = start.elapsed().as_secs_f64();
+                let rate = if elapsed > 0.0 { ingested as f64 / elapsed } else { 0.0 };
+                eprintln!(
+                    "    {:>12} ingested | {:>8} skipped | {:.0} rec/s",
+                    fmt_num(ingested),
+                    fmt_num(skipped),
+                    rate
+                );
+            }
+        }
+    }
+
+    // Send final batch
+    if !batch.is_empty() {
+        let _ = senders[worker_idx % args.workers].send(batch).await;
+    }
+
+    // Drop senders to signal workers to finish
+    drop(senders);
+
+    // Wait for all workers
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let ingested = stats.ingested.load(Ordering::Relaxed);
+    let skipped = stats.skipped.load(Ordering::Relaxed);
+    let elapsed = start.elapsed().as_secs_f64();
+    let rate = if elapsed > 0.0 { ingested as f64 / elapsed } else { 0.0 };
+
     eprintln!(
-        "\nAll done: {} total ingested, {} total skipped across {} file(s)",
-        fmt_num(grand_total),
-        fmt_num(grand_skipped),
-        files.len()
+        "\nAll done: {} ingested, {} skipped in {:.1}s ({:.0} rec/s)",
+        fmt_num(ingested),
+        fmt_num(skipped),
+        elapsed,
+        rate
     );
 }
