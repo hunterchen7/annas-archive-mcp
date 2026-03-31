@@ -243,11 +243,15 @@ async fn insert_batch(client: &Client, batch: &[Row], worker_id: usize) -> Resul
     let tmp = format!("_tmp_ingest_{worker_id}");
     let cols = COLUMNS.join(",");
 
-    // Create temp table (unlogged, no indexes)
-    client.execute(&format!(
-        "CREATE TEMP TABLE IF NOT EXISTS {tmp} (LIKE documents INCLUDING DEFAULTS) ON COMMIT DROP"
-    ), &[]).await?;
-    client.execute(&format!("TRUNCATE {tmp}"), &[]).await?;
+    // Create temp table (no indexes, no constraints — COPY always succeeds)
+    client.batch_execute(&format!(
+        "CREATE TEMP TABLE IF NOT EXISTS {tmp} (\
+            source TEXT, source_id TEXT, md5 TEXT, title TEXT, author TEXT, \
+            publisher TEXT, language TEXT, year SMALLINT, extension TEXT, \
+            filesize BIGINT, pages TEXT, series TEXT, edition TEXT, doi TEXT, \
+            isbn TEXT, description TEXT, aacid TEXT, date_added TEXT\
+        ); TRUNCATE {tmp};"
+    )).await?;
 
     // COPY into temp table (no unique constraints = no failures)
     let copy_stmt = format!("COPY {tmp} ({cols}) FROM STDIN WITH (FORMAT text)");
