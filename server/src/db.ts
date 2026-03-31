@@ -83,8 +83,34 @@ export async function search(opts: SearchOptions): Promise<Document[]> {
 
   let result = await pool.query(sql, params);
 
-  // Trigram fallback for text queries with no FTS results
-  // Only for short queries (likely typos); require high similarity to avoid junk matches
+  // Fallback 1: OR matching when AND returns no results (for 2+ word queries)
+  if (queryType === "text" && result.rows.length === 0) {
+    const words = opts.query.trim().split(/\s+/).filter((w) => w.length > 1);
+    if (words.length >= 2) {
+      const orQuery = words.map((w) => w.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, "")).filter(Boolean).join(" | ");
+      if (orQuery) {
+        const orParams: (string | number)[] = [orQuery];
+        let orIdx = 2;
+        let orSql = `SELECT md5, title, author, publisher, language, year, extension, filesize, source, doi, isbn, pages, series, description,
+                       ts_rank(search_vector, to_tsquery('english_unaccent', $1)) AS rank
+                     FROM documents
+                     WHERE search_vector @@ to_tsquery('english_unaccent', $1)`;
+        if (opts.language) {
+          orSql += ` AND language = $${orIdx++}`;
+          orParams.push(opts.language);
+        }
+        if (opts.format) {
+          orSql += ` AND extension = $${orIdx++}`;
+          orParams.push(opts.format);
+        }
+        orSql += ` ORDER BY rank DESC LIMIT $${orIdx++}`;
+        orParams.push(limit);
+        result = await pool.query(orSql, orParams);
+      }
+    }
+  }
+
+  // Fallback 2: Trigram similarity for single-word queries (typo correction)
   if (queryType === "text" && result.rows.length === 0) {
     const words = opts.query.trim().split(/\s+/);
     if (words.length <= 1) {
