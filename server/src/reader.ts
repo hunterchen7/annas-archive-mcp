@@ -11,7 +11,6 @@ const FILE_CACHE_MB = parseInt(process.env.FILE_CACHE_MB || "2000", 10);
 const TEXT_CACHE_MB = parseInt(process.env.TEXT_CACHE_MB || "500", 10);
 const MAX_OUTPUT_CHARS = parseInt(process.env.MAX_OUTPUT_CHARS || "50000", 10);
 
-// Two separate LRU caches: files (large) and extracted text (smaller)
 const fileCache = new FileCache(
   path.join(CACHE_DIR, "files"),
   FILE_CACHE_MB * 1024 * 1024
@@ -26,6 +25,58 @@ interface ReadResult {
   pageCount?: number;
   format?: string;
   error?: string;
+}
+
+// Magic bytes for format detection
+function detectFormat(filePath: string): string {
+  const buf = Buffer.alloc(16);
+  const fd = fs.openSync(filePath, "r");
+  fs.readSync(fd, buf, 0, 16, 0);
+  fs.closeSync(fd);
+
+  // PDF: starts with %PDF
+  if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) {
+    return "pdf";
+  }
+  // ZIP-based (EPUB, DOCX, etc): starts with PK\x03\x04
+  if (buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
+    // Check if it's an EPUB by looking for mimetype file
+    try {
+      const output = execSync(`unzip -p "${filePath}" mimetype 2>/dev/null || true`, { encoding: "utf-8" });
+      if (output.includes("application/epub")) return "epub";
+    } catch { /* not epub */ }
+    // Check for DOCX
+    try {
+      const output = execSync(`unzip -l "${filePath}" 2>/dev/null | head -20 || true`, { encoding: "utf-8" });
+      if (output.includes("word/document.xml")) return "docx";
+      if (output.includes("[Content_Types].xml")) return "docx";
+    } catch { /* not docx */ }
+    return "zip";
+  }
+  // DJVU: starts with AT&T
+  if (buf[0] === 0x41 && buf[1] === 0x54 && buf[2] === 0x26 && buf[3] === 0x54) {
+    return "djvu";
+  }
+  // MOBI/AZW: starts with "BOOKMOBI"
+  if (buf.slice(0, 8).toString("ascii") === "BOOKMOBI") {
+    return "mobi";
+  }
+  // FB2 (XML-based): starts with <?xml or <FictionBook
+  const head = buf.toString("ascii");
+  if (head.startsWith("<?xml") || head.startsWith("<Fic")) {
+    return "fb2";
+  }
+  // RTF: starts with {\rtf
+  if (head.startsWith("{\\rtf")) {
+    return "rtf";
+  }
+  // Plain text fallback — check if mostly printable ASCII/UTF8
+  try {
+    const sample = fs.readFileSync(filePath, { encoding: "utf-8", flag: "r" }).slice(0, 1000);
+    if (sample.length > 0) return "txt";
+  } catch { /* binary */ }
+
+  return "unknown";
 }
 
 function downloadToFile(url: string, dest: string): Promise<void> {
@@ -46,20 +97,31 @@ function downloadToFile(url: string, dest: string): Promise<void> {
   });
 }
 
-async function ensureFile(md5: string, ext: string, secretKey: string): Promise<string> {
-  const key = `${md5}.${ext}`;
-  const cached = fileCache.get(key);
-  if (cached) return cached;
+async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: string; format: string }> {
+  // Check cache for any existing file with this md5
+  for (const ext of ["pdf", "epub", "djvu", "mobi", "fb2", "docx", "txt", "bin"]) {
+    const cached = fileCache.get(`${md5}.${ext}`);
+    if (cached) return { filePath: cached, format: ext === "bin" ? detectFormat(cached) : ext };
+  }
 
   const result = await getDownloadUrl(md5, secretKey);
   if (result.error || !result.downloadUrl) {
     throw new Error(result.error || "No download URL");
   }
 
-  const filePath = fileCache.pathFor(md5, ext);
-  await downloadToFile(result.downloadUrl, filePath);
-  fileCache.put(key, filePath);
-  return filePath;
+  // Download to a temp file first, detect format, then rename
+  const tmpPath = fileCache.pathFor(md5, "bin");
+  await downloadToFile(result.downloadUrl, tmpPath);
+
+  const format = detectFormat(tmpPath);
+  const finalPath = fileCache.pathFor(md5, format);
+
+  if (tmpPath !== finalPath) {
+    fs.renameSync(tmpPath, finalPath);
+  }
+
+  fileCache.put(`${md5}.${format}`, finalPath);
+  return { filePath: finalPath, format };
 }
 
 function extractPdf(filePath: string): string {
@@ -111,23 +173,78 @@ function extractDjvu(filePath: string): string {
   });
 }
 
-function extractText(filePath: string, ext: string): string {
-  switch (ext) {
+function extractMobi(filePath: string): string {
+  // Try converting mobi to epub first via calibre's ebook-convert if available
+  try {
+    const tmpEpub = `/tmp/mobi_${Date.now()}.epub`;
+    execSync(`ebook-convert "${filePath}" "${tmpEpub}" 2>/dev/null`, { timeout: 60000 });
+    const text = extractEpub(tmpEpub);
+    fs.unlinkSync(tmpEpub);
+    return text;
+  } catch {
+    // Fallback: try extracting raw text with strings
+    return execSync(`strings "${filePath}" | head -10000`, {
+      maxBuffer: 100 * 1024 * 1024,
+      encoding: "utf-8",
+    });
+  }
+}
+
+function extractDocx(filePath: string): string {
+  try {
+    const tmpDir = `/tmp/docx_${Date.now()}`;
+    execSync(`mkdir -p "${tmpDir}" && unzip -o -q "${filePath}" -d "${tmpDir}" 2>/dev/null || true`);
+    const xmlPath = path.join(tmpDir, "word/document.xml");
+    if (fs.existsSync(xmlPath)) {
+      const xml = fs.readFileSync(xmlPath, "utf-8");
+      const text = xml
+        .replace(/<w:br[^>]*\/>/gi, "\n")
+        .replace(/<\/w:p>/gi, "\n\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      execSync(`rm -rf "${tmpDir}"`);
+      return text;
+    }
+    execSync(`rm -rf "${tmpDir}"`);
+    return "[No document.xml found in DOCX]";
+  } catch {
+    return "[Failed to extract DOCX text]";
+  }
+}
+
+function extractFb2(filePath: string): string {
+  const xml = fs.readFileSync(filePath, "utf-8");
+  return xml
+    .replace(/<binary[^>]*>[\s\S]*?<\/binary>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractText(filePath: string, format: string): string {
+  switch (format) {
     case "pdf": return extractPdf(filePath);
     case "epub": return extractEpub(filePath);
     case "djvu": return extractDjvu(filePath);
+    case "mobi": return extractMobi(filePath);
+    case "docx": return extractDocx(filePath);
+    case "fb2": return extractFb2(filePath);
+    case "rtf":
+    case "txt": return fs.readFileSync(filePath, "utf-8");
     default:
-      try { return extractPdf(filePath); }
-      catch { return fs.readFileSync(filePath, "utf-8"); }
+      // Try each extractor until one works
+      for (const fn of [extractPdf, extractEpub]) {
+        try { const t = fn(filePath); if (t.length > 100) return t; } catch { /* next */ }
+      }
+      return fs.readFileSync(filePath, "utf-8");
   }
 }
 
 function splitPages(text: string): string[] {
-  // Split on form feed (PDF page break)
   const ffPages = text.split("\f").filter((p) => p.trim());
   if (ffPages.length > 1) return ffPages;
 
-  // Fallback: split into ~3000 char chunks
   const pages: string[] = [];
   const chunkSize = 3000;
   let i = 0;
@@ -144,12 +261,12 @@ function splitPages(text: string): string[] {
   return pages;
 }
 
-function ensureText(md5: string, filePath: string, ext: string): string {
+function ensureText(md5: string, filePath: string, format: string): string {
   const key = `${md5}.txt`;
   const cached = textCache.get(key);
   if (cached) return fs.readFileSync(cached, "utf-8");
 
-  const text = extractText(filePath, ext);
+  const text = extractText(filePath, format);
   const textPath = textCache.pathFor(md5, "txt");
   fs.writeFileSync(textPath, text);
   textCache.put(key, textPath);
@@ -158,14 +275,17 @@ function ensureText(md5: string, filePath: string, ext: string): string {
 
 export async function readDocument(
   md5: string,
-  ext: string,
+  hintExt: string,
   secretKey: string,
   pageRange?: string
 ): Promise<ReadResult> {
-  // Download file (cached)
+  // Download file (cached) — format auto-detected from magic bytes
   let filePath: string;
+  let format: string;
   try {
-    filePath = await ensureFile(md5, ext, secretKey);
+    const file = await ensureFile(md5, secretKey);
+    filePath = file.filePath;
+    format = file.format;
   } catch (e) {
     return { error: `Failed to download: ${e}` };
   }
@@ -173,25 +293,23 @@ export async function readDocument(
   // Extract text (cached)
   let fullText: string;
   try {
-    fullText = ensureText(md5, filePath, ext);
+    fullText = ensureText(md5, filePath, format);
   } catch (e) {
-    return { error: `Failed to extract text: ${e}` };
+    return { error: `Failed to extract text (format: ${format}): ${e}` };
   }
 
   const pages = splitPages(fullText);
   const pageCount = pages.length;
 
-  // No page range → return overview + first page preview
   if (!pageRange) {
     const preview = pages[0]?.slice(0, 2000) || "[Empty document]";
     return {
-      text: `Document: ${pageCount} pages, format: ${ext}\n\n--- Page 1 preview ---\n${preview}\n\n[Request specific pages with the "pages" parameter, e.g. "1-10"]`,
+      text: `Document: ${pageCount} pages, detected format: ${format}\n\n--- Page 1 preview ---\n${preview}\n\n[Request specific pages with the "pages" parameter, e.g. "1-10"]`,
       pageCount,
-      format: ext,
+      format,
     };
   }
 
-  // Parse page range
   let startPage = 0;
   let endPage = pageCount - 1;
 
@@ -213,13 +331,12 @@ export async function readDocument(
     .join("\n\n");
 
   if (text.length > MAX_OUTPUT_CHARS) {
-    const truncatedAt = endPage + 1;
     text = text.slice(0, MAX_OUTPUT_CHARS) + `\n\n[Truncated at ${MAX_OUTPUT_CHARS} chars. Request a smaller page range.]`;
   }
 
   return {
-    text: `Pages ${startPage + 1}-${endPage + 1} of ${pageCount}:\n\n${text}`,
+    text: `Pages ${startPage + 1}-${endPage + 1} of ${pageCount} (${format}):\n\n${text}`,
     pageCount,
-    format: ext,
+    format,
   };
 }
