@@ -87,7 +87,7 @@ export async function search(opts: SearchOptions): Promise<Document[]> {
   // Only for short queries (likely typos); require high similarity to avoid junk matches
   if (queryType === "text" && result.rows.length === 0) {
     const words = opts.query.trim().split(/\s+/);
-    if (words.length <= 3) {
+    if (words.length <= 1) {
       const trigramParams: (string | number)[] = [opts.query];
       let triIdx = 2;
       let trigramSql = `SELECT md5, title, author, publisher, language, year, extension, filesize, source, doi, isbn, pages, series, description
