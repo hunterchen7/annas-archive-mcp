@@ -1,19 +1,18 @@
-FROM node:22-alpine AS builder
+FROM oven/bun:1 AS builder
 
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
+COPY package.json bun.lock* ./
+RUN bun install
 COPY tsconfig.json ./
 COPY src/ ./src/
-RUN npm run build
+RUN bun build src/index.ts --target=bun --outdir=dist
 
-FROM node:22-alpine
+FROM oven/bun:1-slim
 
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
 COPY --from=builder /app/dist/ ./dist/
+COPY --from=builder /app/node_modules/ ./node_modules/
 
 EXPOSE 3001
 
-CMD ["node", "dist/index.js"]
+CMD ["bun", "run", "dist/index.js"]
