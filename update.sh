@@ -20,19 +20,24 @@ if [ -z "$TORRENTS_JSON" ]; then
     exit 1
 fi
 
-# Get the Docker volume mount path for aac-data
-AAC_DIR=$(docker volume inspect annas-archive-mcp_aac-data --format '{{.Mountpoint}}')
+# List existing files via Docker (avoids host permission issues with volume mounts)
+EXISTING_FILES=$(docker run --rm -v annas-archive-mcp_aac-data:/data alpine ls /data/ 2>/dev/null || true)
+
+if [ -z "$EXISTING_FILES" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') No existing collections found."
+    exit 0
+fi
 
 # Find collections that have newer versions available
 UPDATES=$(echo "$TORRENTS_JSON" | python3 -c "
-import json, sys, os, re
+import json, sys, re
 
 data = json.load(sys.stdin)
-aac_dir = '$AAC_DIR'
+existing_files = '''$EXISTING_FILES'''.strip().split('\n')
 meta = [t for t in data if t.get('is_metadata') and not t.get('obsolete')]
 
 existing = {}
-for f in os.listdir(aac_dir):
+for f in existing_files:
     if not f.endswith('.zst') or f.endswith('.aria2'):
         continue
     m = re.match(r'annas_archive_meta__aacid__(.+?)__(\d{8}T\d{6}Z)--(\d{8}T\d{6}Z)', f)
@@ -46,7 +51,6 @@ for t in meta:
         if coll in name:
             m = re.match(r'annas_archive_meta__aacid__.+?__(\d{8}T\d{6}Z)--(\d{8}T\d{6}Z)', name)
             if m and m.group(2) > info['end_date']:
-                size_gb = t.get('data_size', 0) / (1024**3)
                 updates.append(coll)
                 print(f'{coll}')
             break
