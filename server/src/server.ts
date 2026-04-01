@@ -19,9 +19,10 @@ download: Get a direct download URL by MD5 hash from search results. Requires an
 read: Extract and return full text from a document by MD5 hash. Supports PDF, EPUB, DJVU, MOBI, and more. Use start_page/end_page to paginate.`,
   });
 
-  server.tool(
+  server.registerTool(
     "search",
-    `Search the local Anna's Archive metadata index (~48M books, papers, and documents). Returns metadata and MD5 hashes for downloading.
+    {
+      description: `Search the local Anna's Archive metadata index (~48M books, papers, and documents). Returns metadata and MD5 hashes for downloading.
 
 PARAMETERS — use any combination:
 - "query": General full-text search across title + author + publisher. Best for broad searches.
@@ -51,18 +52,19 @@ QUERY STRATEGIES:
 - If no results, try fewer terms or use "query" instead of specific fields.
 
 RESULTS include: title, author, year, language, format, file size, MD5 hash, ISBN/DOI if available. Use the MD5 with the download or read tools.`,
-    {
-      query: z.string().optional().describe("General full-text search across title, author, and publisher. Use 2-3 key terms, e.g. 'machine learning transformers'. Avoid full sentences."),
-      title: z.string().optional().describe("Full-text search within titles only. e.g. 'Parallax View'. Partial matches work — 'Simulacra' matches 'Simulacra and Simulation'."),
-      author: z.string().optional().describe("Full-text search within authors only. Use surname or full name, e.g. 'Baudrillard' or 'Jean Baudrillard'."),
-      year_from: z.number().optional().describe("Minimum publication year (inclusive). 4-digit year, e.g. 2020."),
-      year_to: z.number().optional().describe("Maximum publication year (inclusive). 4-digit year, e.g. 2024."),
-      publisher: z.string().optional().describe("Full-text search within publishers only. e.g. 'Oxford University Press'."),
-      isbn: z.string().optional().describe("Exact ISBN lookup. 10 or 13 digits, hyphens are stripped automatically. e.g. '978-0-14-044793-4' or '9780140447934'."),
-      doi: z.string().optional().describe("Exact DOI lookup. e.g. '10.1038/nature12345'."),
-      language: z.string().optional().describe("Filter by language. Lowercase English name: 'english', 'chinese', 'french', 'german', 'spanish', 'russian', 'japanese', 'arabic', 'italian', 'portuguese', 'korean'."),
-      format: z.string().optional().describe("Filter by file format. Lowercase extension: 'pdf', 'epub', 'djvu', 'mobi', 'fb2', 'azw3', 'txt', 'docx', 'lit', 'rtf'."),
-      limit: z.number().min(1).max(50).optional().describe("Max results to return. Default 10, max 50. Use higher values for broad searches."),
+      inputSchema: {
+        query: z.string().optional().describe("General full-text search across title, author, and publisher. Use 2-3 key terms, e.g. 'machine learning transformers'. Avoid full sentences."),
+        title: z.string().optional().describe("Full-text search within titles only. e.g. 'Parallax View'. Partial matches work — 'Simulacra' matches 'Simulacra and Simulation'."),
+        author: z.string().optional().describe("Full-text search within authors only. Use surname or full name, e.g. 'Baudrillard' or 'Jean Baudrillard'."),
+        year_from: z.number().optional().describe("Minimum publication year (inclusive). 4-digit year, e.g. 2020."),
+        year_to: z.number().optional().describe("Maximum publication year (inclusive). 4-digit year, e.g. 2024."),
+        publisher: z.string().optional().describe("Full-text search within publishers only. e.g. 'Oxford University Press'."),
+        isbn: z.string().optional().describe("Exact ISBN lookup. 10 or 13 digits, hyphens are stripped automatically. e.g. '978-0-14-044793-4' or '9780140447934'."),
+        doi: z.string().optional().describe("Exact DOI lookup. e.g. '10.1038/nature12345'."),
+        language: z.string().optional().describe("Filter by language. Lowercase English name: 'english', 'chinese', 'french', 'german', 'spanish', 'russian', 'japanese', 'arabic', 'italian', 'portuguese', 'korean'."),
+        format: z.string().optional().describe("Filter by file format. Lowercase extension: 'pdf', 'epub', 'djvu', 'mobi', 'fb2', 'azw3', 'txt', 'docx', 'lit', 'rtf'."),
+        limit: z.number().min(1).max(50).optional().describe("Max results to return. Default 10, max 50. Use higher values for broad searches."),
+      },
     },
     async ({ query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit }) => {
       if (!query && !title && !author && !isbn && !doi) {
@@ -95,15 +97,17 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
     }
   );
 
-  server.tool(
+  server.registerTool(
     "download",
-    `Get a direct download URL for a document by its MD5 hash (from search results). Returns a temporary download link — use it promptly.
+    {
+      description: `Get a direct download URL for a document by its MD5 hash (from search results). Returns a temporary download link — use it promptly.
 
 Requires an Anna's Archive membership API key configured in client headers (X-Annas-Secret-Key).
 
 Present the URL as a clickable markdown link. To save locally: curl -L -o filename.ext '<url>'`,
-    {
-      md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
+      inputSchema: {
+        md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
+      },
     },
     async ({ md5 }) => {
       const doc = await getByMd5(md5);
@@ -124,10 +128,11 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
     }
   );
 
-  server.tool(
+  server.registerTool(
     "stats",
-    "Get statistics about the local Anna's Archive metadata index — total records and breakdown by source collection.",
-    {},
+    {
+      description: "Get statistics about the local Anna's Archive metadata index — total records and breakdown by source collection.",
+    },
     async () => {
       const stats = await getStats();
       const lines = [`Total documents: ${stats.total.toLocaleString()}\n\nBy source:`];
@@ -138,9 +143,10 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
     }
   );
 
-  server.tool(
+  server.registerTool(
     "read",
-    `Read the text content of a document by its MD5 hash. Downloads the file, extracts text, and returns it page by page. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
+    {
+      description: `Read the text content of a document by its MD5 hash. Downloads the file, extracts text, and returns it page by page. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
 
 Requires an Anna's Archive membership API key (configured in client headers) to download files not already cached.
 
@@ -155,10 +161,11 @@ TYPICAL WORKFLOW:
 2. read(md5) → get page count and preview
 3. read(md5, start_page=1, end_page=10) → read first 10 pages
 4. read(md5, start_page=11, end_page=20) → continue reading`,
-    {
-      md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
-      start_page: z.number().min(1).optional().describe("First page to return (1-indexed). Omit to get document overview."),
-      end_page: z.number().min(1).optional().describe("Last page to return (inclusive). Omit to read from start_page to the cap."),
+      inputSchema: {
+        md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
+        start_page: z.number().min(1).optional().describe("First page to return (1-indexed). Omit to get document overview."),
+        end_page: z.number().min(1).optional().describe("Last page to return (inclusive). Omit to read from start_page to the cap."),
+      },
     },
     async ({ md5, start_page, end_page }) => {
       const doc = await getByMd5(md5);
@@ -169,7 +176,6 @@ TYPICAL WORKFLOW:
         if (end_page != null) {
           pageRange = `${start_page}-${end_page}`;
         } else {
-          // Default: start_page to start_page + 20 (reasonable chunk)
           pageRange = `${start_page}-${start_page + 19}`;
         }
       }
