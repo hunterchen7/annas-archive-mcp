@@ -152,8 +152,123 @@ fn title_from_filename(meta: &Value) -> Option<String> {
     truncate(&title, 4000)
 }
 
+/// Extract metadata from nexusstc records which have a different nested structure:
+/// metadata.record.links[].md5, metadata.record.title[], metadata.record.authors[].name, etc.
+fn extract_nexusstc(record: &Value, source: &str) -> Option<Row> {
+    let meta = record.get("metadata")?;
+    let rec = meta.get("record")?;
+
+    // MD5 is in links[0].md5
+    let links = rec.get("links").and_then(|v| v.as_array())?;
+    let link = links.first()?;
+    let md5_raw = link.get("md5").and_then(|v| v.as_str())?;
+    let md5: String = md5_raw.trim().to_lowercase();
+    if md5.len() != 32 || !md5.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let source_id = meta.get("nexus_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    // Title is an array: record.title[0]
+    let title = rec.get("title")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .and_then(|s| truncate(s, 4000));
+
+    // Authors: record.authors[].name joined
+    let author = rec.get("authors")
+        .and_then(|v| v.as_array())
+        .map(|authors| {
+            authors.iter()
+                .filter_map(|a| a.get("name").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.is_empty())
+        .and_then(|s| truncate(&s, 2000));
+
+    // Language: record.languages[0]
+    let language = rec.get("languages")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .and_then(|s| truncate(s, 100));
+
+    let extension = link.get("extension").and_then(|v| v.as_str())
+        .and_then(|s| truncate(s, 20));
+    let filesize = link.get("filesize").and_then(|v| v.as_i64());
+
+    // Year from issued_at (unix timestamp in seconds)
+    let year = rec.get("issued_at")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_i64())
+        .and_then(|ts| {
+            // Convert unix timestamp to year
+            let secs_per_year: i64 = 365 * 24 * 3600;
+            let y = (1970 + ts / secs_per_year) as i16;
+            if (1000..=2100).contains(&y) { Some(y) } else { None }
+        });
+
+    // Nested metadata: record.metadata[0]
+    let rmeta = rec.get("metadata")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first());
+
+    let publisher = rmeta
+        .and_then(|m| m.get("publisher"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| truncate(s, 1000));
+
+    let isbn = rmeta
+        .and_then(|m| m.get("isbns"))
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.replace('-', "").trim().chars().take(13).collect::<String>())
+        .filter(|s| !s.is_empty());
+
+    let series = rmeta
+        .and_then(|m| m.get("series"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| truncate(s, 1000));
+
+    let doi = rec.get("doi")
+        .and_then(|v| v.as_str())
+        .and_then(|s| truncate(s, 200));
+
+    let aacid = record.get("aacid").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    Some(Row {
+        source: source.to_string(),
+        source_id,
+        md5,
+        title,
+        author,
+        publisher,
+        language,
+        year,
+        extension,
+        filesize,
+        pages: None,
+        series,
+        edition: None,
+        doi,
+        isbn,
+        description: None,
+        aacid,
+        date_added: None,
+    })
+}
+
 fn extract_metadata(record: &Value, source: &str) -> Option<Row> {
     let meta = record.get("metadata")?;
+
+    // Nexusstc has a nested structure with record.links[].md5
+    if meta.get("record").is_some() && meta.get("nexus_id").is_some() {
+        return extract_nexusstc(record, source);
+    }
 
     // Skip records flagged as duplicates by Anna's Archive
     if let Some(Value::Bool(true)) = meta.get("deleted_as_duplicate") {
