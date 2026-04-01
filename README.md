@@ -2,7 +2,7 @@
 
 A self-hosted [MCP](https://modelcontextprotocol.io) server that indexes Anna's Archive metadata into a local PostgreSQL database. Search books, papers, and documents by title, author, DOI, or ISBN with full-text search, diacritic-insensitive matching, and MD5 deduplication. Get direct download URLs via the Anna's Archive API.
 
-This project only indexes publicly available metadata. It does not host or distribute any copyrighted content. Downloading files **requires your own [Anna's Archive membership](https://annas-archive.gl/account) API key**.
+This project only indexes publicly available metadata. It does not host or distribute any copyrighted content. Downloading files **requires your own [Anna's Archive membership](https://annas-archive.gl/account) secret key**.
 
 Works with Claude Code, Claude Desktop, claude.ai, and any MCP-compatible client.
 
@@ -25,7 +25,7 @@ Works with Claude Code, Claude Desktop, claude.ai, and any MCP-compatible client
 | Tool       | Description                                                                                                                        |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `search`   | Granular search with dedicated fields for title, author, year range, publisher, ISBN, DOI, language, and format. All combinable.    |
-| `download` | Get a direct download URL for a document by MD5 hash. **Requires your own Anna's Archive membership API key** (provided via client headers). |
+| `download` | Get a fast download URL for a document by MD5 hash. **Requires your own Anna's Archive membership secret key** (provided via client headers). |
 | `read`     | Extract and return text content from a document by MD5 hash. Supports PDF, EPUB, DJVU, MOBI, and more. Results are cached.         |
 | `stats`    | Index statistics — total records and breakdown by source collection.                                                               |
 
@@ -80,7 +80,7 @@ claude mcp add --transport http annas-archive http://localhost:3001/mcp
 
 # With AA download key (search + download)
 claude mcp add --transport http annas-archive http://localhost:3001/mcp \
-  --header "X-Annas-Secret-Key: YOUR_AA_API_KEY"
+  --header "X-Annas-Secret-Key: YOUR_AA_SECRET_KEY"
 ```
 
 ### Claude Desktop
@@ -93,7 +93,7 @@ Add to `claude_desktop_config.json`:
     "annas-archive": {
       "url": "http://localhost:3001/mcp",
       "headers": {
-        "X-Annas-Secret-Key": "YOUR_AA_API_KEY"
+        "X-Annas-Secret-Key": "YOUR_AA_SECRET_KEY"
       }
     }
   }
@@ -111,7 +111,7 @@ docker compose --profile tunnel up -d
 Then in claude.ai: Settings -> Integrations -> Add custom connector:
 
 ```
-URL: https://your-tunnel-url.com/mcp?aa_key=YOUR_AA_API_KEY
+URL: https://your-tunnel-url.com/mcp?aa_key=YOUR_AA_SECRET_KEY
 ```
 
 ## Collections
@@ -170,7 +170,7 @@ annas-archive-mcp/
 - **Granular search** — dedicated title, author, year range, publisher, ISBN, and DOI parameters with per-field GIN indexes
 - **AND matching with fallbacks** — multi-word queries require all terms to match; OR fallback for multi-word, trigram for single-word typo correction
 - **Domain fallback** — Anna's Archive domains change frequently; the server tries `gl` → `gd` → `pk` automatically
-- **Client-provided API key** — the AA membership key is sent via `X-Annas-Secret-Key` header, never stored on the server
+- **Client-provided secret key** — the AA membership secret key is sent via `X-Annas-Secret-Key` header, never stored on the server
 
 ## Configuration
 
@@ -234,7 +234,7 @@ Features:
 This project provides a search interface over publicly available metadata published by Anna's Archive. It does **not** host, distribute, or store any copyrighted content.
 
 - **Metadata only** — the database contains bibliographic information (titles, authors, ISBNs, etc.), not the actual files.
-- **Downloads** require the user to provide their own Anna's Archive membership API key. This project does not provide, share, or store API keys.
+- **Downloads** require the user to provide their own Anna's Archive membership secret key. This project does not provide, share, or store secret keys.
 - **No affiliation** — this project is not affiliated with, endorsed by, or connected to Anna's Archive.
 - **User responsibility** — users are solely responsible for how they use this tool and for complying with all applicable laws in their jurisdiction.
 - **No warranty** — this software is provided as-is with no guarantees of any kind.

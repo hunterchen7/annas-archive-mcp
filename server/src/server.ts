@@ -14,9 +14,9 @@ Tools: search → download or read.
 
 search: Find documents using any combination of title, author, year_from/year_to, publisher, isbn, doi, language, format. Example: search(title="Simulacra", author="Baudrillard", format="pdf") or search(query="machine learning", year_from=2023, language="english").
 
-download: Get a direct download URL by MD5 hash from search results. Requires an Anna's Archive membership API key (in X-Annas-Secret-Key header).
+download: Get a fast download URL by MD5 hash from search results. Requires an Anna's Archive membership secret key (in X-Annas-Secret-Key header).
 
-read: Extract and return full text from a document by MD5 hash. Supports PDF, EPUB, DJVU, MOBI, and more. Use start_page/end_page to paginate.`,
+read: Extract and return full text from a document by MD5 hash. Also requires membership secret key. Supports PDF, EPUB, DJVU, MOBI, and more. Use start_page/end_page to paginate.`,
   });
 
   server.registerTool(
@@ -100,9 +100,9 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
   server.registerTool(
     "download",
     {
-      description: `Get a direct download URL for a document by its MD5 hash (from search results). Returns a temporary download link — use it promptly.
+      description: `Get a fast download URL for a document by its MD5 hash (from search results). Returns a temporary download link — use it promptly.
 
-Requires an Anna's Archive membership API key configured in client headers (X-Annas-Secret-Key).
+Requires an Anna's Archive membership secret key configured in client headers (X-Annas-Secret-Key). Get one at https://annas-archive.gl/account .
 
 Present the URL as a clickable markdown link. To save locally: curl -L -o filename.ext '<url>'`,
       inputSchema: {
@@ -146,9 +146,9 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
   server.registerTool(
     "read",
     {
-      description: `Read the text content of a document by its MD5 hash. Downloads the file, extracts text, and returns it page by page. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
+      description: `Read the text content of a document by its MD5 hash. Downloads the file via fast download, extracts text, and returns it page by page. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
 
-Requires an Anna's Archive membership API key (configured in client headers) to download files not already cached.
+Requires an Anna's Archive membership secret key (configured in client headers as X-Annas-Secret-Key) to download files not already cached.
 
 BEHAVIOR:
 - No page range → returns page count + first page preview. Use this first to understand the document.

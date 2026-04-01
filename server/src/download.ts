@@ -25,7 +25,7 @@ function fetch(url: string): Promise<string> {
 
 export async function getDownloadUrl(md5: string, secretKey: string): Promise<{ downloadUrl?: string; error?: string }> {
   if (!secretKey) {
-    return { error: "No API key provided. Configure X-Annas-Secret-Key header in your MCP client." };
+    return { error: "No secret key provided. An Anna's Archive membership secret key is required for downloads. Configure it via the X-Annas-Secret-Key header in your MCP client settings." };
   }
 
   let resp: FastDownloadResponse | undefined;
@@ -46,6 +46,9 @@ export async function getDownloadUrl(md5: string, secretKey: string): Promise<{ 
   }
 
   if (resp.error) {
+    if (resp.error === "Invalid secret key") {
+      return { error: "Invalid secret key. Check that your Anna's Archive membership secret key is correct. You can find it at https://annas-archive.gl/account ." };
+    }
     return { error: resp.error };
   }
   if (!resp.download_url) {
