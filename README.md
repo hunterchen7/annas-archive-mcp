@@ -24,9 +24,28 @@ Works with Claude Code, Claude Desktop, claude.ai, and any MCP-compatible client
 
 | Tool       | Description                                                                                                                        |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `search`   | Query by title, author, DOI, ISBN, or keywords. Returns metadata + MD5 hashes. Supports language and format filters.               |
+| `search`   | Granular search with dedicated fields for title, author, year range, publisher, ISBN, DOI, language, and format. All combinable.    |
 | `download` | Get a direct download URL for a document by MD5 hash. **Requires your own Anna's Archive membership API key** (provided via client headers). |
+| `read`     | Extract and return text content from a document by MD5 hash. Supports PDF, EPUB, DJVU, MOBI, and more. Results are cached.         |
 | `stats`    | Index statistics — total records and breakdown by source collection.                                                               |
+
+### Search Parameters
+
+All parameters are optional and combinable. At least one of `query`, `title`, `author`, `isbn`, or `doi` is required.
+
+| Parameter   | Type   | Description                                            |
+| ----------- | ------ | ------------------------------------------------------ |
+| `query`     | string | General full-text search across title, author, publisher |
+| `title`     | string | Search within titles only                              |
+| `author`    | string | Search within authors only                             |
+| `year_from` | number | Minimum publication year (inclusive)                    |
+| `year_to`   | number | Maximum publication year (inclusive)                    |
+| `publisher` | string | Search within publishers only                          |
+| `isbn`      | string | Exact ISBN lookup (10 or 13 digits)                    |
+| `doi`       | string | Exact DOI lookup                                       |
+| `language`  | string | Filter by language (e.g. `english`, `chinese`, `french`) |
+| `format`    | string | Filter by file format (e.g. `pdf`, `epub`, `djvu`, `mobi`) |
+| `limit`     | number | Max results (default 10, max 50)                       |
 
 ## Quick Start
 
@@ -128,10 +147,12 @@ annas-archive-mcp/
 ├── server/                     # TypeScript MCP server
 │   ├── src/
 │   │   ├── index.ts            # Entrypoint — stdio vs HTTP transport
-│   │   ├── server.ts           # MCP tool definitions (search, download, stats)
+│   │   ├── server.ts           # MCP tool definitions (search, download, read, stats)
 │   │   ├── db.ts               # PostgreSQL queries (FTS, trigram, DOI/ISBN lookup)
-│   │   └── download.ts         # Anna's Archive API client with domain fallback
-│   └── Dockerfile              # Multi-stage Node.js build
+│   │   ├── download.ts         # Anna's Archive API client with domain fallback
+│   │   ├── reader.ts           # Text extraction with format detection and LRU cache
+│   │   └── cache.ts            # LRU file cache for downloaded files and extracted text
+│   └── Dockerfile              # Multi-stage Bun build with calibre, poppler, djvulibre
 ├── ingest/                     # Rust ingestion binary
 │   ├── src/main.rs             # Parallel workers, temp-table COPY, MD5 dedup
 │   ├── schema.sql              # PostgreSQL schema with unaccent FTS
@@ -146,7 +167,8 @@ annas-archive-mcp/
 - **MD5 as primary key** — one row per unique file, deduplicating across all source collections
 - **Metadata completeness scoring** — when duplicate MD5s are ingested from different sources, the record with more non-null fields wins
 - **Unaccent FTS** — searching "Zizek" finds "Žižek"; diacritics are stripped at both index and query time
-- **AND matching** — multi-word queries require all terms to match; trigram fallback only for single-word typo correction
+- **Granular search** — dedicated title, author, year range, publisher, ISBN, and DOI parameters with per-field GIN indexes
+- **AND matching with fallbacks** — multi-word queries require all terms to match; OR fallback for multi-word, trigram for single-word typo correction
 - **Domain fallback** — Anna's Archive domains change frequently; the server tries `gl` → `gd` → `pk` automatically
 - **Client-provided API key** — the AA membership key is sent via `X-Annas-Secret-Key` header, never stored on the server
 

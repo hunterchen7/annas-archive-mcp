@@ -8,37 +8,71 @@ export function createServer(secretKey?: string): McpServer {
   const server = new McpServer({
     name: "annas-archive",
     version: "1.0.0",
-    description: "Search and download books, papers, and documents from a local Anna's Archive metadata index. Use search to find documents, then download to get a direct URL. Download the file locally with curl: curl -L -o <filename> '<url>'",
+    description: `Search ~48M books, papers, and documents from a local Anna's Archive metadata index.
+
+Tools: search → download or read.
+
+search: Find documents using any combination of title, author, year_from/year_to, publisher, isbn, doi, language, format. Example: search(title="Simulacra", author="Baudrillard", format="pdf") or search(query="machine learning", year_from=2023, language="english").
+
+download: Get a direct download URL by MD5 hash from search results. Requires an Anna's Archive membership API key (in X-Annas-Secret-Key header).
+
+read: Extract and return full text from a document by MD5 hash. Supports PDF, EPUB, DJVU, MOBI, and more. Use start_page/end_page to paginate.`,
   });
 
   server.tool(
     "search",
-    `Search the local Anna's Archive metadata index for books, papers, and other documents. Returns metadata and MD5 hashes for downloading.
+    `Search the local Anna's Archive metadata index (~48M books, papers, and documents). Returns metadata and MD5 hashes for downloading.
+
+PARAMETERS — use any combination:
+- "query": General full-text search across title + author + publisher. Best for broad searches.
+- "title": Search within titles only. Use this when you know the book/paper name.
+- "author": Search within authors only. Use this to find works by a specific person.
+- "publisher": Search within publishers only.
+- "year_from" / "year_to": Filter by publication year range (e.g. year_from=2020, year_to=2024).
+- "isbn": Exact ISBN lookup (10 or 13 digits, hyphens OK).
+- "doi": Exact DOI lookup (e.g. "10.1038/nature12345").
+- "language": Filter by language — lowercase English name (e.g. "english", "chinese", "french", "german", "spanish", "russian", "japanese", "arabic").
+- "format": Filter by file format (e.g. "pdf", "epub", "djvu", "mobi", "fb2", "azw3").
+- "limit": Max results (default 10, max 50).
 
 SEARCH BEHAVIOR:
-- Uses AND matching — all query terms must appear across title, author, or publisher fields. More terms = fewer results.
-- Use 2-3 specific terms for best results. Avoid long natural language queries.
-- Diacritic-insensitive — "Zizek" matches "Žižek", "Simulacre" matches "Simulacré".
-- Stopwords like "and", "the", "of" are ignored by the search engine.
-- If AND matching returns no results, automatically falls back to OR matching (ranked by relevance).
+- All text params use AND matching — all terms must appear. More terms = fewer, more precise results.
+- Diacritic-insensitive: "Zizek" matches "Žižek".
+- Stopwords ("the", "of", "and") are ignored.
+- If "query" AND matching returns nothing, automatically falls back to OR matching.
+- You can combine params freely: title="Pedagogy" + author="Freire" + format="pdf" + language="english".
 
 QUERY STRATEGIES:
-- For a specific book: use key title words + author surname. e.g. "Parallax View Zizek" not "The Parallax View by Slavoj Žižek"
-- For an author's works: just use the author name. e.g. "Baudrillard"
-- For DOI lookup: pass the DOI directly e.g. "10.1038/nature12345"
-- For ISBN lookup: pass the ISBN directly (10 or 13 digits)
-- For non-English titles: search in the original language. e.g. "三國演義" not "Romance of the Three Kingdoms"
-- If a query returns no results, try fewer terms or broader keywords.
+- Specific book: use "title" + "author". e.g. title="Parallax View", author="Zizek"
+- Author's works: use "author" alone. e.g. author="Baudrillard"
+- Broad topic: use "query". e.g. query="machine learning neural networks"
+- Recent papers: use "query" or "title" + year_from/year_to. e.g. query="transformer attention", year_from=2023
+- Non-English: search in original language. e.g. title="三國演義"
+- If no results, try fewer terms or use "query" instead of specific fields.
 
-RESULTS include: title, author, year, language, format, file size, MD5 hash, ISBN/DOI if available. Use the MD5 hash with the download tool to get the file.`,
+RESULTS include: title, author, year, language, format, file size, MD5 hash, ISBN/DOI if available. Use the MD5 with the download or read tools.`,
     {
-      query: z.string().describe("Search query — 2-3 key terms from title/author, a DOI, or an ISBN. Fewer terms = more results."),
-      language: z.string().optional().describe("Filter by language (e.g. 'english', 'chinese', 'french')"),
-      format: z.string().optional().describe("Filter by file format (e.g. 'pdf', 'epub', 'djvu')"),
-      limit: z.number().min(1).max(50).optional().describe("Max results to return (default 10, max 50)"),
+      query: z.string().optional().describe("General full-text search across title, author, and publisher. Use 2-3 key terms, e.g. 'machine learning transformers'. Avoid full sentences."),
+      title: z.string().optional().describe("Full-text search within titles only. e.g. 'Parallax View'. Partial matches work — 'Simulacra' matches 'Simulacra and Simulation'."),
+      author: z.string().optional().describe("Full-text search within authors only. Use surname or full name, e.g. 'Baudrillard' or 'Jean Baudrillard'."),
+      year_from: z.number().optional().describe("Minimum publication year (inclusive). 4-digit year, e.g. 2020."),
+      year_to: z.number().optional().describe("Maximum publication year (inclusive). 4-digit year, e.g. 2024."),
+      publisher: z.string().optional().describe("Full-text search within publishers only. e.g. 'Oxford University Press'."),
+      isbn: z.string().optional().describe("Exact ISBN lookup. 10 or 13 digits, hyphens are stripped automatically. e.g. '978-0-14-044793-4' or '9780140447934'."),
+      doi: z.string().optional().describe("Exact DOI lookup. e.g. '10.1038/nature12345'."),
+      language: z.string().optional().describe("Filter by language. Lowercase English name: 'english', 'chinese', 'french', 'german', 'spanish', 'russian', 'japanese', 'arabic', 'italian', 'portuguese', 'korean'."),
+      format: z.string().optional().describe("Filter by file format. Lowercase extension: 'pdf', 'epub', 'djvu', 'mobi', 'fb2', 'azw3', 'txt', 'docx', 'lit', 'rtf'."),
+      limit: z.number().min(1).max(50).optional().describe("Max results to return. Default 10, max 50. Use higher values for broad searches."),
     },
-    async ({ query, language, format, limit }) => {
-      const results = await search({ query, language, format, limit });
+    async ({ query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit }) => {
+      if (!query && !title && !author && !isbn && !doi) {
+        return { content: [{ type: "text", text: "Please provide at least one search parameter: query, title, author, isbn, or doi." }], isError: true };
+      }
+      const results = await search({
+        query, title, author,
+        yearFrom: year_from, yearTo: year_to,
+        publisher, isbn, doi, language, format, limit,
+      });
       if (results.length === 0) {
         return { content: [{ type: "text", text: "No results found. Try fewer search terms, or search in the original language for non-English titles." }] };
       }
@@ -63,7 +97,11 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
 
   server.tool(
     "download",
-    "Get a direct download URL for a document by its MD5 hash (from search results). Returns a temporary download link — use it promptly. Present the URL as a clickable markdown link to the user. To save locally, use: curl -L -o filename.epub '<url>'",
+    `Get a direct download URL for a document by its MD5 hash (from search results). Returns a temporary download link — use it promptly.
+
+Requires an Anna's Archive membership API key configured in client headers (X-Annas-Secret-Key).
+
+Present the URL as a clickable markdown link. To save locally: curl -L -o filename.ext '<url>'`,
     {
       md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
     },
@@ -102,17 +140,18 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
 
   server.tool(
     "read",
-    `Read the text content of a document by its MD5 hash. Downloads the file, extracts text, and returns it. Results are cached — subsequent reads of the same document are instant.
+    `Read the text content of a document by its MD5 hash. Downloads the file, extracts text, and returns it page by page. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
+
+Requires an Anna's Archive membership API key (configured in client headers) to download files not already cached.
 
 BEHAVIOR:
-- With no page range: returns page count + first page preview. Use this to understand the document before reading more.
-- With start_page: returns from that page onward (capped at ~50k chars).
-- With start_page + end_page: returns that specific range.
-- Output is capped at 50k characters. Request smaller ranges for large documents.
-- Requires an Anna's Archive API key (configured in client headers) to download files not already cached.
+- No page range → returns page count + first page preview. Use this first to understand the document.
+- start_page only → returns 20 pages starting from that page.
+- start_page + end_page → returns that exact range.
+- Output capped at 50k characters. Request smaller ranges for large documents.
 
 TYPICAL WORKFLOW:
-1. search("topic") → find document, get MD5
+1. search(title="Pedagogy", author="Freire") → find document, get MD5
 2. read(md5) → get page count and preview
 3. read(md5, start_page=1, end_page=10) → read first 10 pages
 4. read(md5, start_page=11, end_page=20) → continue reading`,

@@ -10,7 +10,7 @@ services:
       - ./ingest/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
     ports:
       - "5432:5432"
-    shm_size: 256mb
+    shm_size: 1gb
     command: >
       postgres
         -c shared_buffers=4GB

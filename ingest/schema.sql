@@ -43,3 +43,6 @@ CREATE INDEX IF NOT EXISTS idx_documents_isbn ON documents (isbn) WHERE isbn IS 
 CREATE INDEX IF NOT EXISTS idx_documents_language ON documents (language);
 CREATE INDEX IF NOT EXISTS idx_documents_extension ON documents (extension);
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents (source);
+CREATE INDEX IF NOT EXISTS idx_documents_year ON documents (year) WHERE year IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_documents_title_fts ON documents USING GIN (to_tsvector('english_unaccent', coalesce(title, '')));
+CREATE INDEX IF NOT EXISTS idx_documents_author_fts ON documents USING GIN (to_tsvector('english_unaccent', coalesce(author, '')));
