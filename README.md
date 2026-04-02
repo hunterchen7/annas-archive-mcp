@@ -229,12 +229,24 @@ Features:
 | RAM (recommended)  | 8 GB              | 16+ GB             |
 | Ingestion time     | ~15 min           | ~1 hour            |
 
+## Why local index instead of scraping?
+
+This project indexes metadata locally rather than scraping Anna's Archive at query time. A few reasons:
+
+- **robots.txt** — Anna's Archive [disallows](https://annas-archive.gl/robots.txt) automated access to `/search`. We respect that.
+- **Speed** — local PostgreSQL full-text search returns results in milliseconds, vs seconds for a network round-trip.
+- **Reliability** — no dependency on Anna's Archive being up or reachable at query time. Domains change frequently.
+- **Rate limiting** — scraping at scale would put unnecessary load on their servers.
+
+Downloads use the official `fast_download.json` API, which is the sanctioned way to interact programmatically.
+
 ## Disclaimer
 
 This project provides a search interface over publicly available metadata published by Anna's Archive. It does **not** host, distribute, or store any copyrighted content.
 
 - **Metadata only** — the database contains bibliographic information (titles, authors, ISBNs, etc.), not the actual files.
 - **Downloads** require the user to provide their own Anna's Archive membership secret key. This project does not provide, share, or store secret keys.
+- **No scraping** — search is performed against a local index built from publicly available metadata dumps. We do not scrape or crawl Anna's Archive, in accordance with their robots.txt.
 - **No affiliation** — this project is not affiliated with, endorsed by, or connected to Anna's Archive.
 - **User responsibility** — users are solely responsible for how they use this tool and for complying with all applicable laws in their jurisdiction.
 - **No warranty** — this software is provided as-is with no guarantees of any kind.
