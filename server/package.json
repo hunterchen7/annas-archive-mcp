@@ -8,8 +8,11 @@
     "dev": "bun run src/index.ts"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.12",
+    "@hono/zod-openapi": "^1.2.4",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "express": "^4.21.0",
+    "hono": "^4.12.10",
     "pg": "^8.13.0"
   },
   "devDependencies": {
