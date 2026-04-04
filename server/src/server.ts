@@ -3,6 +3,7 @@ import { z } from "zod";
 import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
+import { scrapeSearch } from "./scrape.js";
 
 export function createServer(secretKey?: string): McpServer {
   const server = new McpServer({
@@ -194,6 +195,61 @@ TYPICAL WORKFLOW:
       }
 
       return { content: [{ type: "text", text: header + (result.text || "") }] };
+    }
+  );
+
+  server.registerTool(
+    "web_search",
+    {
+      description: `Search Anna's Archive website directly via scraping. This searches the live site and may find documents not in the local index. Requires an Anna's Archive membership secret key.
+
+Use this when:
+- The local "search" tool returns no results
+- You want to search by topic/keyword more broadly
+- You need the most up-to-date catalog
+
+Returns: title, author, publisher, year, language, format, filesize, description, MD5 hash, category, and source libraries.
+
+The MD5 from results can be used with the "download" and "read" tools.`,
+      inputSchema: {
+        query: z.string().describe("Search query — title, author, topic, ISBN, etc."),
+        extension: z.string().optional().describe("Filter by file format: pdf, epub, djvu, mobi, fb2, etc."),
+        language: z.string().optional().describe("Filter by language code: en, zh, fr, de, es, ru, ja, ar, etc."),
+        sort: z.string().optional().describe("Sort order: 'most_relevant' (default), 'newest', 'oldest', 'largest', 'smallest'."),
+      },
+    },
+    async ({ query, extension, language, sort }) => {
+      if (!secretKey) {
+        return { content: [{ type: "text", text: "Web search requires an Anna's Archive membership secret key. Configure it via the X-Annas-Secret-Key header in your MCP client settings." }], isError: true };
+      }
+
+      const { results, error } = await scrapeSearch({ query, extension, language, sort });
+
+      if (error) {
+        return { content: [{ type: "text", text: `Scrape failed: ${error}` }], isError: true };
+      }
+      if (results.length === 0) {
+        return { content: [{ type: "text", text: "No results found on Anna's Archive." }] };
+      }
+
+      const formatted = results.map((r, i) => {
+        const parts = [`${i + 1}. **${r.title}**`];
+        if (r.author) parts.push(`   Author: ${r.author}`);
+        if (r.publisher) parts.push(`   Publisher: ${r.publisher}`);
+        if (r.year) parts.push(`   Year: ${r.year}`);
+        if (r.language) parts.push(`   Language: ${r.language}`);
+        if (r.extension) parts.push(`   Format: ${r.extension}`);
+        if (r.filesize) parts.push(`   Size: ${r.filesize}`);
+        if (r.description) parts.push(`   Description: ${r.description.slice(0, 200)}${r.description.length > 200 ? "..." : ""}`);
+        if (r.category) parts.push(`   Category: ${r.category}`);
+        if (r.sources) parts.push(`   Sources: ${r.sources}`);
+        parts.push(`   MD5: ${r.md5}`);
+        return parts.join("\n");
+      });
+
+      return {
+        content: [{ type: "text", text: `Found ${results.length} results from Anna's Archive:\n\n${formatted.join("\n\n")}` }],
+      };
     }
   );
 

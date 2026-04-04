@@ -2,6 +2,7 @@ import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
+import { scrapeSearch } from "./scrape.js";
 
 const DocumentSchema = z.object({
   md5: z.string(),
@@ -164,6 +165,60 @@ app.openapi(readRoute, async (c) => {
   });
 });
 
+// --- Web Search (scrape) ---
+
+const ScrapeResultSchema = z.object({
+  md5: z.string(),
+  title: z.string(),
+  author: z.string().nullable(),
+  publisher: z.string().nullable(),
+  year: z.number().nullable(),
+  language: z.string().nullable(),
+  extension: z.string().nullable(),
+  filesize: z.string().nullable(),
+  description: z.string().nullable(),
+  category: z.string().nullable(),
+  sources: z.string().nullable(),
+}).openapi("ScrapeResult");
+
+const webSearchRoute = createRoute({
+  method: "get",
+  path: "/web-search",
+  operationId: "webSearch",
+  summary: "Search Anna's Archive website",
+  description: "Search the live Anna's Archive website via scraping. May find documents not in the local index. Requires an Anna's Archive membership secret key via X-Annas-Secret-Key header or aa_key query param.",
+  request: {
+    query: z.object({
+      query: z.string().openapi({ description: "Search query.", example: "machine learning transformers" }),
+      ext: z.string().optional().openapi({ description: "Filter by file format.", example: "pdf" }),
+      lang: z.string().optional().openapi({ description: "Filter by language code.", example: "en" }),
+      sort: z.string().optional().openapi({ description: "Sort: most_relevant, newest, oldest, largest, smallest." }),
+      aa_key: z.string().optional().openapi({ description: "Secret key (alternative to header)." }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Search results from Anna's Archive",
+      content: { "application/json": { schema: z.object({ count: z.number(), results: z.array(ScrapeResultSchema) }) } },
+    },
+    401: { description: "Missing secret key", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "Scraping error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(webSearchRoute, async (c) => {
+  const { query, ext, lang, sort, aa_key } = c.req.valid("query");
+  const secretKey = c.req.header("x-annas-secret-key") || aa_key || "";
+  if (!secretKey) {
+    return c.json({ error: "Secret key required for web search. Provide via X-Annas-Secret-Key header or aa_key query param." }, 401);
+  }
+  const { results, error } = await scrapeSearch({ query, extension: ext, language: lang, sort });
+  if (error) {
+    return c.json({ error }, 502);
+  }
+  return c.json({ count: results.length, results });
+});
+
 // --- Stats ---
 
 const statsRoute = createRoute({
@@ -207,5 +262,11 @@ app.doc("/openapi.json", {
     { url: "http://localhost:3001/api", description: "Local" },
   ],
 });
+
+import { getRequestListener } from "@hono/node-server";
+
+export function createNodeHandler() {
+  return getRequestListener(app.fetch);
+}
 
 export { app as apiApp };

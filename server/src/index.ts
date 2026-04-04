@@ -1,9 +1,9 @@
 import { createServer } from "./server.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { serve } from "@hono/node-server";
-import { Hono } from "hono";
-import { apiApp } from "./api.js";
+import express from "express";
+import type { Request, Response, NextFunction } from "express";
+import { createNodeHandler } from "./api.js";
 
 const transport = process.env.TRANSPORT || "http";
 
@@ -13,7 +13,9 @@ if (transport === "stdio") {
   await server.connect(stdioTransport);
   console.error("MCP server running on stdio");
 } else {
-  const app = new Hono();
+  const app = express();
+  app.set("trust proxy", true);
+  app.use(express.json());
 
   // Rate limiting — per IP, in memory
   const RATE_WINDOW_MS = 60_000;
@@ -27,15 +29,15 @@ if (transport === "stdio") {
     }
   }, 300_000);
 
-  function getClientIp(c: { req: { header: (name: string) => string | undefined; raw: Request } }): string {
-    return c.req.header("cf-connecting-ip") ||
-      c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+  function getClientIp(req: Request): string {
+    return (req.headers["cf-connecting-ip"] as string) ||
+      req.ip ||
+      req.socket.remoteAddress ||
       "unknown";
   }
 
-  // Rate limit middleware for /mcp and /api
-  app.use("/mcp/*", async (c, next) => {
-    const ip = getClientIp(c);
+  function rateLimit(req: Request, res: Response, next: NextFunction) {
+    const ip = getClientIp(req);
     const now = Date.now();
     let entry = hits.get(ip);
     if (!entry || now > entry.resetAt) {
@@ -43,55 +45,46 @@ if (transport === "stdio") {
       hits.set(ip, entry);
     }
     entry.count++;
-    c.header("X-RateLimit-Limit", String(RATE_MAX));
-    c.header("X-RateLimit-Remaining", String(Math.max(0, RATE_MAX - entry.count)));
-    c.header("X-RateLimit-Reset", String(Math.ceil(entry.resetAt / 1000)));
+    res.setHeader("X-RateLimit-Limit", RATE_MAX);
+    res.setHeader("X-RateLimit-Remaining", Math.max(0, RATE_MAX - entry.count));
+    res.setHeader("X-RateLimit-Reset", Math.ceil(entry.resetAt / 1000));
     if (entry.count > RATE_MAX) {
-      return c.json({ error: "Rate limit exceeded. Try again in a minute." }, 429);
+      res.status(429).json({ error: "Rate limit exceeded. Try again in a minute." });
+      return;
     }
-    await next();
-  });
+    next();
+  }
 
-  app.use("/api/*", async (c, next) => {
-    const ip = getClientIp(c);
-    const now = Date.now();
-    let entry = hits.get(ip);
-    if (!entry || now > entry.resetAt) {
-      entry = { count: 0, resetAt: now + RATE_WINDOW_MS };
-      hits.set(ip, entry);
-    }
-    entry.count++;
-    c.header("X-RateLimit-Limit", String(RATE_MAX));
-    c.header("X-RateLimit-Remaining", String(Math.max(0, RATE_MAX - entry.count)));
-    c.header("X-RateLimit-Reset", String(Math.ceil(entry.resetAt / 1000)));
-    if (entry.count > RATE_MAX) {
-      return c.json({ error: "Rate limit exceeded. Try again in a minute." }, 429);
-    }
-    await next();
-  });
+  // MCP transport
+  app.use("/mcp", rateLimit);
 
-  // MCP transport — needs raw Node req/res via @hono/node-server
-  app.post("/mcp", async (c) => {
-    const secretKey = c.req.header("x-annas-secret-key") || c.req.query("aa_key") || "";
+  app.post("/mcp", async (req, res) => {
+    const secretKey =
+      (req.headers["x-annas-secret-key"] as string) ||
+      (req.query.aa_key as string) ||
+      "";
     const server = createServer(secretKey);
     const httpTransport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     await server.connect(httpTransport);
-
-    // Get raw Node req/res from the node-server binding
-    const nodeBindings = c.env as { incoming: import("http").IncomingMessage; outgoing: import("http").ServerResponse };
-    const body = await c.req.json();
-    await httpTransport.handleRequest(nodeBindings.incoming, nodeBindings.outgoing, body);
-    return new Response(null);
+    await httpTransport.handleRequest(req, res, req.body);
   });
 
-  app.get("/mcp", (c) => c.json({ name: "annas-archive", version: "1.0.0", status: "ok" }));
-  app.get("/health", (c) => c.json({ status: "ok", transport: "http" }));
+  app.get("/mcp", (_req, res) => {
+    res.json({ name: "annas-archive", version: "1.0.0", status: "ok" });
+  });
 
-  // Mount typed REST API
-  app.route("/api", apiApp);
+  // REST API (Hono + zod-openapi)
+  app.use("/api", rateLimit);
+  const apiHandler = createNodeHandler();
+  app.use("/api", (req, res) => apiHandler(req, res));
+
+  // Health
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", transport: "http" });
+  });
 
   const port = parseInt(process.env.PORT || "3001", 10);
-  serve({ fetch: app.fetch, port }, (info) => {
-    console.log(`MCP server listening on http://0.0.0.0:${info.port}/mcp`);
+  app.listen(port, "0.0.0.0", () => {
+    console.log(`MCP server listening on http://0.0.0.0:${port}/mcp`);
   });
 }
