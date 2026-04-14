@@ -37,11 +37,13 @@ services:
       RATE_LIMIT: ${RATE_LIMIT:-60}
       TRANSPORT: ${TRANSPORT:-http}
       PORT: "3001"
+      CACHE_MODE: ${CACHE_MODE:-memory}
       CACHE_DIR: /data/cache
       FILE_CACHE_MB: ${FILE_CACHE_MB:-2000}
       TEXT_CACHE_MB: ${TEXT_CACHE_MB:-500}
     volumes:
       - cache:/data/cache
+    shm_size: ${MCP_SHM_SIZE:-512m}
     depends_on:
       postgres:
         condition: service_healthy

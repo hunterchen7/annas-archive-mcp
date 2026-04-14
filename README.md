@@ -2,50 +2,52 @@
 
 A self-hosted [MCP](https://modelcontextprotocol.io) server that indexes Anna's Archive metadata into a local PostgreSQL database. Search books, papers, and documents by title, author, DOI, or ISBN with full-text search, diacritic-insensitive matching, and MD5 deduplication. Get direct download URLs via the Anna's Archive API.
 
-This project only indexes publicly available metadata. It does not host or distribute any copyrighted content. Downloading files **requires your own [Anna's Archive membership](https://annas-archive.gl/account) secret key**.
+This project only indexes publicly available metadata. It does not host or distribute any copyrighted content. Access to the index — **both searching and downloading** — requires your own [Anna's Archive membership](https://annas-archive.gl/account) secret key.
 
 Works with Claude Code, Claude Desktop, claude.ai, and any MCP-compatible client.
 
 ```
                           ┌──────────────────────┐
                      ┌───▶│     PostgreSQL       │
-┌──────────────┐     │    │  FTS + trigram index │
-│  MCP Client  │     │    └──────────────────────┘
-│              │─────┤
-│  Claude Code │     │    ┌──────────────────────┐
-│  Claude.ai   │◀────┤    │  Anna's Archive API  │
-│  Any client  │     └───▶│  fast_download.json  │
-└──────────────┘          └──────────────────────┘
+                     │    │  FTS + trigram index │
+┌──────────────┐     │    └──────────────────────┘
+│  MCP Client  │     │
+│              │─────┤    ┌──────────────────────┐
+│  Claude Code │     │    │  Anna's Archive      │
+│  Claude.ai   │◀────┼───▶│  POST /account/      │ ← key validation
+│  Any client  │     │    │  fast_download.json  │ ← downloads
+└──────────────┘     │    └──────────────────────┘
+      (X-Annas-Secret-Key header)
                 MCP Server
                (TypeScript)
 ```
 
 ## Tools
 
-| Tool       | Description                                                                                                                        |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `search`   | Granular search with dedicated fields for title, author, year range, publisher, ISBN, DOI, language, and format. All combinable.    |
-| `download` | Get a fast download URL for a document by MD5 hash. **Requires your own Anna's Archive membership secret key** (provided via client headers). |
-| `read`     | Extract and return text content from a document by MD5 hash. Supports PDF, EPUB, DJVU, MOBI, and more. Results are cached.         |
-| `stats`    | Index statistics — total records and breakdown by source collection.                                                               |
+| Tool       | Description                                                                                                                                                              |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `search`   | Granular search with dedicated fields for title, author, year range, publisher, ISBN, DOI, language, and format. All combinable. **Requires a validated AA secret key.** |
+| `download` | Get a fast download URL for a document by MD5 hash. **Requires your own Anna's Archive membership secret key** (provided via client headers).                            |
+| `read`     | Extract and return text content from a document by MD5 hash. Supports PDF, EPUB, DJVU, MOBI, and more. Results are cached. **Requires a validated AA secret key.**       |
+| `stats`    | Index statistics — total records and breakdown by source collection. (No key required.)                                                                                  |
 
 ### Search Parameters
 
 All parameters are optional and combinable. At least one of `query`, `title`, `author`, `isbn`, or `doi` is required.
 
-| Parameter   | Type   | Description                                            |
-| ----------- | ------ | ------------------------------------------------------ |
-| `query`     | string | General full-text search across title, author, publisher |
-| `title`     | string | Search within titles only                              |
-| `author`    | string | Search within authors only                             |
-| `year_from` | number | Minimum publication year (inclusive)                    |
-| `year_to`   | number | Maximum publication year (inclusive)                    |
-| `publisher` | string | Search within publishers only                          |
-| `isbn`      | string | Exact ISBN lookup (10 or 13 digits)                    |
-| `doi`       | string | Exact DOI lookup                                       |
-| `language`  | string | Filter by language (e.g. `english`, `chinese`, `french`) |
+| Parameter   | Type   | Description                                                |
+| ----------- | ------ | ---------------------------------------------------------- |
+| `query`     | string | General full-text search across title, author, publisher   |
+| `title`     | string | Search within titles only                                  |
+| `author`    | string | Search within authors only                                 |
+| `year_from` | number | Minimum publication year (inclusive)                       |
+| `year_to`   | number | Maximum publication year (inclusive)                       |
+| `publisher` | string | Search within publishers only                              |
+| `isbn`      | string | Exact ISBN lookup (10 or 13 digits)                        |
+| `doi`       | string | Exact DOI lookup                                           |
+| `language`  | string | Filter by language (e.g. `english`, `chinese`, `french`)   |
 | `format`    | string | Filter by file format (e.g. `pdf`, `epub`, `djvu`, `mobi`) |
-| `limit`     | number | Max results (default 10, max 50)                       |
+| `limit`     | number | Max results (default 10, max 50)                           |
 
 ## Quick Start
 
@@ -75,10 +77,7 @@ curl http://localhost:3001/health
 ### Claude Code
 
 ```bash
-# Without AA download key (search only)
-claude mcp add --transport http annas-archive http://localhost:3001/mcp
-
-# With AA download key (search + download)
+# An Anna's Archive membership secret key is required for search, download, and read.
 claude mcp add --transport http annas-archive http://localhost:3001/mcp \
   --header "X-Annas-Secret-Key: YOUR_AA_SECRET_KEY"
 ```
@@ -146,11 +145,12 @@ annas-archive-mcp/
 ├── docker-compose.yml          # Full stack: Postgres, MCP server, ingest, download, tunnel
 ├── server/                     # TypeScript MCP server
 │   ├── src/
-│   │   ├── index.ts            # Entrypoint — stdio vs HTTP transport
+│   │   ├── index.ts            # Entrypoint — stdio vs HTTP transport, REST + /mcp routes
 │   │   ├── server.ts           # MCP tool definitions (search, download, read, stats)
 │   │   ├── db.ts               # PostgreSQL queries (FTS, trigram, DOI/ISBN lookup)
 │   │   ├── download.ts         # Anna's Archive API client with domain fallback
 │   │   ├── reader.ts           # Text extraction with format detection and LRU cache
+│   │   ├── auth.ts             # AA secret key validation via POST /account/ with SHA-256-keyed cache
 │   │   └── cache.ts            # LRU file cache for downloaded files and extracted text
 │   └── Dockerfile              # Multi-stage Bun build with calibre, poppler, djvulibre
 ├── ingest/                     # Rust ingestion binary
@@ -170,20 +170,22 @@ annas-archive-mcp/
 - **Granular search** — dedicated title, author, year range, publisher, ISBN, and DOI parameters with per-field GIN indexes
 - **AND matching with fallbacks** — multi-word queries require all terms to match; OR fallback for multi-word, trigram for single-word typo correction
 - **Domain fallback** — Anna's Archive domains change frequently; the server tries `gl` → `gd` → `pk` automatically
-- **Client-provided secret key** — the AA membership secret key is sent via `X-Annas-Secret-Key` header, never stored on the server
+- **Client-provided secret key, validated, never persisted** — the AA membership secret key is sent per request via `X-Annas-Secret-Key` (or `aa_key` query param). The server validates it against AA's own `POST /account/` login endpoint and caches the verdict for 1 hour (valid) or 5 minutes (invalid). The cache is keyed by `SHA-256(key)`, so plaintext keys never sit in memory beyond a single validation call. No disk, no database, no logs.
 
 ## Configuration
 
 ### Environment Variables
 
-| Variable                  | Description                                   | Default                                                     |
-| ------------------------- | --------------------------------------------- | ----------------------------------------------------------- |
-| `POSTGRES_PASSWORD`       | PostgreSQL password                           | `annas`                                                     |
-| `RATE_LIMIT`              | Max requests per minute per IP                | `60`                                                        |
-| `TRANSPORT`               | `http` or `stdio`                             | `http`                                                      |
-| `COLLECTIONS`             | Comma-separated collection names to download  | `zlib3_records,upload_records,ia2_records,nexusstc_records` |
-| `CLOUDFLARE_TUNNEL_TOKEN` | Named tunnel token for permanent external URL | (none)                                                      |
-| `SEED_TIME`               | Seconds to seed after download                | `0`                                                         |
+| Variable                  | Description                                                                      | Default                                                     |
+| ------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `POSTGRES_PASSWORD`       | PostgreSQL password                                                              | `annas`                                                     |
+| `RATE_LIMIT`              | Max requests per minute per IP                                                   | `60`                                                        |
+| `TRANSPORT`               | `http` or `stdio`                                                                | `http`                                                      |
+| `COLLECTIONS`             | Comma-separated collection names to download                                     | `zlib3_records,upload_records,ia2_records,nexusstc_records` |
+| `CLOUDFLARE_TUNNEL_TOKEN` | Named tunnel token for permanent external URL                                    | (none)                                                      |
+| `CACHE_MODE`              | `memory` (nothing on disk) or `disk` (LRU file cache)                            | `memory`                                                    |
+| `MCP_SHM_SIZE`            | `/dev/shm` size for the mcp-server container (memory-mode extractors write here) | `512m`                                                      |
+| `SEED_TIME`               | Seconds to seed after download                                                   | `0`                                                         |
 
 ### PostgreSQL Tuning
 
@@ -244,8 +246,9 @@ Downloads use the official `fast_download.json` API, which is the sanctioned way
 
 This project provides a search interface over publicly available metadata published by Anna's Archive. It does **not** host, distribute, or store any copyrighted content.
 
-- **Metadata only** — the database contains bibliographic information (titles, authors, ISBNs, etc.), not the actual files.
-- **Downloads** require the user to provide their own Anna's Archive membership secret key. This project does not provide, share, or store secret keys.
+- **No copyrighted content is ever written to or stored on disk.** The index holds only bibliographic metadata (titles, authors, ISBNs, etc.) — never file contents.
+- **Downloads pass through Anna's Archive, not this server.** The `download` tool returns a short-lived URL from AA's own `fast_download.json` API; the file is delivered directly from AA to the user.
+- **Access requires an Anna's Archive membership** — both searching and downloading require the user to supply their own AA secret key, which the server validates against Anna's Archive on each first use. This project does not provide, share, or store secret keys; only a transient SHA-256 hash is cached in memory.
 - **No scraping** — search is performed against a local index built from publicly available metadata dumps. We do not scrape or crawl Anna's Archive, in accordance with their robots.txt.
 - **No affiliation** — this project is not affiliated with, endorsed by, or connected to Anna's Archive.
 - **User responsibility** — users are solely responsible for how they use this tool and for complying with all applicable laws in their jurisdiction.

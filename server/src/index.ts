@@ -2,6 +2,7 @@ import { createServer } from "./server.js";
 import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
+import { validateKey } from "./auth.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
@@ -102,6 +103,17 @@ if (transport === "stdio") {
 
   // GET /api/search
   app.get("/api/search", async (req, res) => {
+    const auth = await validateKey(getSecretKey(req));
+    if (!auth.ok) {
+      const status = auth.reason === "unreachable" ? 503 : 401;
+      const message = auth.reason === "missing"
+        ? "Search requires an Anna's Archive membership secret key. Provide via X-Annas-Secret-Key header or aa_key query param."
+        : auth.reason === "invalid"
+        ? "Invalid Anna's Archive secret key."
+        : "Could not reach Anna's Archive to validate your key. Try again in a moment.";
+      res.status(status).json({ error: message });
+      return;
+    }
     const { query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit } = req.query;
     if (!query && !title && !author && !isbn && !doi) {
       res.status(400).json({ error: "Provide at least one of: query, title, author, isbn, doi" });
@@ -164,6 +176,17 @@ if (transport === "stdio") {
 
   // GET /api/book/:md5 — metadata lookup
   app.get("/api/book/:md5", async (req, res) => {
+    const auth = await validateKey(getSecretKey(req));
+    if (!auth.ok) {
+      const status = auth.reason === "unreachable" ? 503 : 401;
+      const message = auth.reason === "missing"
+        ? "Metadata lookup requires an Anna's Archive membership secret key. Provide via X-Annas-Secret-Key header or aa_key query param."
+        : auth.reason === "invalid"
+        ? "Invalid Anna's Archive secret key."
+        : "Could not reach Anna's Archive to validate your key. Try again in a moment.";
+      res.status(status).json({ error: message });
+      return;
+    }
     const doc = await getByMd5(req.params.md5);
     if (!doc) {
       res.status(404).json({ error: "Not found" });

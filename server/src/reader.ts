@@ -1,24 +1,32 @@
 import fs from "fs";
 import path from "path";
-import { execSync } from "child_process";
+import crypto from "crypto";
+import { execSync, spawnSync } from "child_process";
 import { getDownloadUrl } from "./download.js";
 import { FileCache } from "./cache.js";
+import { MemoryTextCache } from "./memoryCache.js";
 import https from "https";
 import http from "http";
 
+// CACHE_MODE: "memory" (default) keeps nothing on disk across requests —
+// downloaded files are streamed through a per-request tmp path and unlinked
+// immediately after text extraction; only extracted text is retained, in a
+// bounded in-memory LRU. "disk" persists both files and text to CACHE_DIR.
+const CACHE_MODE = (process.env.CACHE_MODE || "memory").toLowerCase();
 const CACHE_DIR = process.env.CACHE_DIR || "/data/cache";
 const FILE_CACHE_MB = parseInt(process.env.FILE_CACHE_MB || "2000", 10);
 const TEXT_CACHE_MB = parseInt(process.env.TEXT_CACHE_MB || "500", 10);
 const MAX_OUTPUT_CHARS = parseInt(process.env.MAX_OUTPUT_CHARS || "50000", 10);
 
-const fileCache = new FileCache(
-  path.join(CACHE_DIR, "files"),
-  FILE_CACHE_MB * 1024 * 1024
-);
-const textCache = new FileCache(
-  path.join(CACHE_DIR, "text"),
-  TEXT_CACHE_MB * 1024 * 1024
-);
+const USE_DISK = CACHE_MODE === "disk";
+
+const fileCache = USE_DISK
+  ? new FileCache(path.join(CACHE_DIR, "files"), FILE_CACHE_MB * 1024 * 1024)
+  : null;
+const diskTextCache = USE_DISK
+  ? new FileCache(path.join(CACHE_DIR, "text"), TEXT_CACHE_MB * 1024 * 1024)
+  : null;
+const memTextCache = USE_DISK ? null : new MemoryTextCache(TEXT_CACHE_MB * 1024 * 1024);
 
 interface ReadResult {
   text?: string;
@@ -27,15 +35,26 @@ interface ReadResult {
   error?: string;
 }
 
-// Magic bytes for format detection
-function detectFormat(filePath: string): string {
-  const size = fs.statSync(filePath).size;
-  const readSize = Math.min(size, 128);
-  const buf = Buffer.alloc(readSize);
-  const fd = fs.openSync(filePath, "r");
-  fs.readSync(fd, buf, 0, readSize, 0);
-  fs.closeSync(fd);
+// Magic bytes for format detection — accepts either a file path or a Buffer
+function detectFormat(source: string | Buffer): string {
+  let buf: Buffer;
+  let filePath: string | null = null;
+  let fullBuf: Buffer;
+  if (typeof source === "string") {
+    filePath = source;
+    const size = fs.statSync(filePath).size;
+    const readSize = Math.min(size, 128);
+    buf = Buffer.alloc(readSize);
+    const fd = fs.openSync(filePath, "r");
+    fs.readSync(fd, buf, 0, readSize, 0);
+    fs.closeSync(fd);
+    fullBuf = buf;
+  } else {
+    buf = source.slice(0, 128);
+    fullBuf = source;
+  }
 
+  const readSize = buf.length;
   const head16 = buf.slice(0, 16).toString("ascii");
 
   // PDF: starts with %PDF
@@ -44,15 +63,23 @@ function detectFormat(filePath: string): string {
   }
   // ZIP-based (EPUB, DOCX, etc): starts with PK\x03\x04
   if (buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
-    try {
-      const output = execSync(`unzip -p "${filePath}" mimetype 2>/dev/null || true`, { encoding: "utf-8" });
-      if (output.includes("application/epub")) return "epub";
-    } catch { /* not epub */ }
-    try {
-      const output = execSync(`unzip -l "${filePath}" 2>/dev/null | head -20 || true`, { encoding: "utf-8" });
-      if (output.includes("word/document.xml")) return "docx";
-      if (output.includes("[Content_Types].xml")) return "docx";
-    } catch { /* not docx */ }
+    if (filePath) {
+      try {
+        const output = execSync(`unzip -p "${filePath}" mimetype 2>/dev/null || true`, { encoding: "utf-8" });
+        if (output.includes("application/epub")) return "epub";
+      } catch { /* not epub */ }
+      try {
+        const output = execSync(`unzip -l "${filePath}" 2>/dev/null | head -20 || true`, { encoding: "utf-8" });
+        if (output.includes("word/document.xml")) return "docx";
+        if (output.includes("[Content_Types].xml")) return "docx";
+      } catch { /* not docx */ }
+    } else {
+      // In-memory detection: search for filenames stored in the ZIP central directory.
+      // EPUBs always contain META-INF/container.xml; DOCX always contains word/document.xml.
+      const asStr = fullBuf.toString("latin1");
+      if (asStr.includes("META-INF/container.xml") || asStr.includes("application/epub")) return "epub";
+      if (asStr.includes("word/document.xml") || asStr.includes("[Content_Types].xml")) return "docx";
+    }
     return "zip";
   }
   // DJVU: starts with AT&T
@@ -74,11 +101,10 @@ function detectFormat(filePath: string): string {
   }
   // FB2 (XML-based): starts with <?xml or <FictionBook
   if (head16.startsWith("<?xml") || head16.startsWith("<Fic")) {
-    // Could be FB2 or other XML — check deeper
-    try {
-      const sample = fs.readFileSync(filePath, { encoding: "utf-8", flag: "r" }).slice(0, 500);
-      if (sample.includes("FictionBook")) return "fb2";
-    } catch { /* not text */ }
+    const sample = filePath
+      ? (() => { try { return fs.readFileSync(filePath!, { encoding: "utf-8", flag: "r" }).slice(0, 500); } catch { return ""; } })()
+      : fullBuf.slice(0, 500).toString("utf-8");
+    if (sample.includes("FictionBook")) return "fb2";
     return "fb2";
   }
   // RTF: starts with {\rtf
@@ -86,10 +112,10 @@ function detectFormat(filePath: string): string {
     return "rtf";
   }
   // Plain text fallback
-  try {
-    const sample = fs.readFileSync(filePath, { encoding: "utf-8", flag: "r" }).slice(0, 1000);
-    if (sample.length > 0) return "txt";
-  } catch { /* binary */ }
+  const textSample = filePath
+    ? (() => { try { return fs.readFileSync(filePath!, { encoding: "utf-8", flag: "r" }).slice(0, 1000); } catch { return ""; } })()
+    : fullBuf.slice(0, 1000).toString("utf-8");
+  if (textSample.length > 0) return "txt";
 
   return "unknown";
 }
@@ -112,10 +138,28 @@ function downloadToFile(url: string, dest: string): Promise<void> {
   });
 }
 
+function downloadToBuffer(url: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith("https") ? https : http;
+    client.get(url, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return downloadToBuffer(res.headers.location).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+      }
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
 async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: string; format: string }> {
   // Check cache for any existing file with this md5
   for (const ext of ["pdf", "epub", "djvu", "mobi", "fb2", "docx", "txt", "bin"]) {
-    const cached = fileCache.get(`${md5}.${ext}`);
+    const cached = fileCache!.get(`${md5}.${ext}`);
     if (cached) return { filePath: cached, format: ext === "bin" ? detectFormat(cached) : ext };
   }
 
@@ -125,17 +169,17 @@ async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: s
   }
 
   // Download to a temp file first, detect format, then rename
-  const tmpPath = fileCache.pathFor(md5, "bin");
+  const tmpPath = fileCache!.pathFor(md5, "bin");
   await downloadToFile(result.downloadUrl, tmpPath);
 
   const format = detectFormat(tmpPath);
-  const finalPath = fileCache.pathFor(md5, format);
+  const finalPath = fileCache!.pathFor(md5, format);
 
   if (tmpPath !== finalPath) {
     fs.renameSync(tmpPath, finalPath);
   }
 
-  fileCache.put(`${md5}.${format}`, finalPath);
+  fileCache!.put(`${md5}.${format}`, finalPath);
   return { filePath: finalPath, format };
 }
 
@@ -205,6 +249,46 @@ function extractWithCalibre(filePath: string): string {
   }
 }
 
+// Memory-mode extraction: for formats whose tools support stdin we pipe the
+// buffer in directly; for everything else we materialize to /dev/shm (a
+// RAM-backed tmpfs on Linux — never touches persistent storage) and unlink
+// in finally.
+function extractPdfFromBuffer(buf: Buffer): string {
+  const result = spawnSync("pdftotext", ["-layout", "-", "-"], {
+    input: buf,
+    maxBuffer: 100 * 1024 * 1024,
+    encoding: "utf-8",
+  });
+  if (result.status !== 0) throw new Error(`pdftotext exited ${result.status}`);
+  return result.stdout || "";
+}
+
+function withShmFile<T>(buf: Buffer, ext: string, fn: (p: string) => T): T {
+  const shmDir = fs.existsSync("/dev/shm") ? "/dev/shm" : "/tmp";
+  const p = path.join(shmDir, `aa-${crypto.randomBytes(8).toString("hex")}.${ext}`);
+  fs.writeFileSync(p, buf);
+  try {
+    return fn(p);
+  } finally {
+    try { fs.unlinkSync(p); } catch { /* already gone */ }
+  }
+}
+
+function extractTextFromBuffer(buf: Buffer, format: string): string {
+  if (format === "pdf") return extractPdfFromBuffer(buf);
+  if (format === "txt") return buf.toString("utf-8");
+  // Everything else needs a file path — materialize to tmpfs (RAM), extract, unlink.
+  if (format === "epub") return withShmFile(buf, "epub", extractEpub);
+  if (format === "djvu") return withShmFile(buf, "djvu", extractDjvu);
+  return withShmFile(buf, format || "bin", (p) => {
+    try { return extractWithCalibre(p); }
+    catch {
+      try { return extractPdfFromBuffer(buf); } catch { /* not pdf */ }
+      return buf.toString("utf-8");
+    }
+  });
+}
+
 function extractText(filePath: string, format: string): string {
   // PDF: pdftotext is best
   if (format === "pdf") return extractPdf(filePath);
@@ -244,16 +328,36 @@ function splitPages(text: string): string[] {
   return pages;
 }
 
-function ensureText(md5: string, filePath: string, format: string): string {
+function ensureTextDisk(md5: string, filePath: string, format: string): string {
   const key = `${md5}.txt`;
-  const cached = textCache.get(key);
+  const cached = diskTextCache!.get(key);
   if (cached) return fs.readFileSync(cached, "utf-8");
 
   const text = extractText(filePath, format);
-  const textPath = textCache.pathFor(md5, "txt");
+  const textPath = diskTextCache!.pathFor(md5, "txt");
   fs.writeFileSync(textPath, text);
-  textCache.put(key, textPath);
+  diskTextCache!.put(key, textPath);
   return text;
+}
+
+async function readInMemory(md5: string, secretKey: string): Promise<{ text: string; format: string }> {
+  const cachedText = memTextCache!.get(md5);
+  if (cachedText) {
+    // Format is not reliably known for cached text; re-derive from stored marker if needed,
+    // but downstream splitPages/pagination doesn't require it. Return "txt" as a neutral label.
+    return { text: cachedText, format: "txt" };
+  }
+
+  const result = await getDownloadUrl(md5, secretKey);
+  if (result.error || !result.downloadUrl) {
+    throw new Error(result.error || "No download URL");
+  }
+
+  const buf = await downloadToBuffer(result.downloadUrl);
+  const format = detectFormat(buf);
+  const text = extractTextFromBuffer(buf, format);
+  memTextCache!.put(md5, text);
+  return { text, format };
 }
 
 export async function readDocument(
@@ -262,23 +366,31 @@ export async function readDocument(
   secretKey: string,
   pageRange?: string
 ): Promise<ReadResult> {
-  // Download file (cached) — format auto-detected from magic bytes
-  let filePath: string;
-  let format: string;
-  try {
-    const file = await ensureFile(md5, secretKey);
-    filePath = file.filePath;
-    format = file.format;
-  } catch (e) {
-    return { error: `Failed to download: ${e}` };
-  }
-
-  // Extract text (cached)
   let fullText: string;
-  try {
-    fullText = ensureText(md5, filePath, format);
-  } catch (e) {
-    return { error: `Failed to extract text (format: ${format}): ${e}` };
+  let format: string;
+
+  if (USE_DISK) {
+    let filePath: string;
+    try {
+      const file = await ensureFile(md5, secretKey);
+      filePath = file.filePath;
+      format = file.format;
+    } catch (e) {
+      return { error: `Failed to download: ${e}` };
+    }
+    try {
+      fullText = ensureTextDisk(md5, filePath, format);
+    } catch (e) {
+      return { error: `Failed to extract text (format: ${format}): ${e}` };
+    }
+  } else {
+    try {
+      const r = await readInMemory(md5, secretKey);
+      fullText = r.text;
+      format = r.format;
+    } catch (e) {
+      return { error: `Failed to read: ${e}` };
+    }
   }
 
   const pages = splitPages(fullText);

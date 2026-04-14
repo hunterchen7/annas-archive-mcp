@@ -3,6 +3,7 @@ import { z } from "zod";
 import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
+import { validateKey } from "./auth.js";
 
 export function createServer(secretKey?: string): McpServer {
   const server = new McpServer({
@@ -67,6 +68,15 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
       },
     },
     async ({ query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit }) => {
+      const auth = await validateKey(secretKey || "");
+      if (!auth.ok) {
+        const msg = auth.reason === "missing"
+          ? "Search requires an Anna's Archive membership secret key. Configure it via the X-Annas-Secret-Key header in your MCP client settings. Get one at https://annas-archive.gl/account ."
+          : auth.reason === "invalid"
+          ? "Invalid Anna's Archive secret key. Check it at https://annas-archive.gl/account ."
+          : "Could not reach Anna's Archive to validate your key. Try again in a moment.";
+        return { content: [{ type: "text", text: msg }], isError: true };
+      }
       if (!query && !title && !author && !isbn && !doi) {
         return { content: [{ type: "text", text: "Please provide at least one search parameter: query, title, author, isbn, or doi." }], isError: true };
       }
