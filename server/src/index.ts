@@ -151,21 +151,32 @@ if (transport === "stdio") {
     const secretKey = getSecretKey(req);
     const doc = await getByMd5(req.params.md5);
     const ext = doc?.extension || "pdf";
-    const { start_page, end_page } = req.query;
+    const { start_page, end_page, chapter, list_chapters } = req.query;
 
-    let pageRange: string | undefined;
-    if (start_page) {
+    const opts: { pageRange?: string; chapter?: number; listChapters?: boolean } = {};
+    if (list_chapters === "true" || list_chapters === "1") {
+      opts.listChapters = true;
+    } else if (chapter) {
+      const c = parseInt(chapter as string);
+      if (Number.isFinite(c) && c >= 1) opts.chapter = c;
+    } else if (start_page) {
       const sp = parseInt(start_page as string);
       const ep = end_page ? parseInt(end_page as string) : sp + 19;
-      pageRange = `${sp}-${ep}`;
+      opts.pageRange = `${sp}-${ep}`;
     }
 
-    const result = await readDocument(req.params.md5, ext, secretKey, pageRange);
+    const result = await readDocument(req.params.md5, ext, secretKey, opts);
     if (result.error) {
       res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
       return;
     }
-    res.json({ document: doc ? { title: doc.title, author: doc.author, format: doc.extension } : null, text: result.text });
+    res.json({
+      document: doc ? { title: doc.title, author: doc.author, format: doc.extension } : null,
+      text: result.text,
+      page_count: result.pageCount,
+      format: result.format,
+      chapters: result.chapters,
+    });
   });
 
   // GET /api/stats

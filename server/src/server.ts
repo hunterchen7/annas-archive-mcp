@@ -17,7 +17,7 @@ search: Find documents using any combination of title, author, year_from/year_to
 
 download: Get a fast download URL by MD5 hash from search results. Requires an Anna's Archive membership secret key (in X-Annas-Secret-Key header).
 
-read: Extract and return full text from a document by MD5 hash. Also requires membership secret key. Supports PDF, EPUB, DJVU, MOBI, and more. Use start_page/end_page to paginate.`,
+read: Extract and return full text from a document by MD5 hash. Also requires membership secret key. Supports PDF, EPUB, DJVU, MOBI, and more. Use start_page/end_page to paginate, or list_chapters=true / chapter=N to navigate by chapter.`,
   });
 
   server.registerTool(
@@ -51,6 +51,12 @@ QUERY STRATEGIES:
 - Recent papers: use "query" or "title" + year_from/year_to. e.g. query="transformer attention", year_from=2023
 - Non-English: search in original language. e.g. title="三國演義"
 - If no results, try fewer terms or use "query" instead of specific fields.
+
+FORMAT TIPS (for "read" workflows):
+- When the same work is available as both PDF and EPUB, EPUB is surfaced first automatically — EPUBs have native chapter structure, so chapter-based reading is accurate.
+- For reading books (not papers), prefer EPUB when available. The read tool's chapter/list_chapters features work best on EPUB.
+- For papers and articles, PDF is usually the only option and works fine with page-based reading.
+- Only set format="pdf" explicitly if the user specifically needs the PDF version.
 
 RESULTS include: title, author, year, language, format, file size, MD5 hash, ISBN/DOI if available. Use the MD5 with the download or read tools.`,
       inputSchema: {
@@ -156,41 +162,50 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
   server.registerTool(
     "read",
     {
-      description: `Read the text content of a document by its MD5 hash. Downloads the file via fast download, extracts text, and returns it page by page. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
+      description: `Read the text content of a document by its MD5 hash. Downloads the file via fast download, extracts text, and returns it page by page OR chapter by chapter. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
 
 Requires an Anna's Archive membership secret key (configured in client headers as X-Annas-Secret-Key) to download files not already cached.
 
 BEHAVIOR:
-- No page range → returns page count + first page preview. Use this first to understand the document.
+- No arguments → returns page count, chapter count (if detected), and first page preview. Use this first to understand the document.
+- list_chapters=true → returns the detected table of contents (chapter number, title, page range) without content.
+- chapter=N → returns the full text of chapter N (1-indexed, from the detected TOC).
 - start_page only → returns 20 pages starting from that page.
 - start_page + end_page → returns that exact range.
-- Output capped at 50k characters. Request smaller ranges for large documents.
+- Output capped at 50k characters. Request a smaller range or narrower chapter if truncated.
+
+Chapter detection is heuristic (matches "Chapter N", "Part N", roman numerals, "Prologue", "Introduction", "Appendix", etc.). Books without clearly-marked headings won't have chapters detected — fall back to page ranges.
 
 TYPICAL WORKFLOW:
 1. search(title="Pedagogy", author="Freire") → find document, get MD5
-2. read(md5) → get page count and preview
-3. read(md5, start_page=1, end_page=10) → read first 10 pages
-4. read(md5, start_page=11, end_page=20) → continue reading`,
+2. read(md5) → get page count, chapter count, and preview
+3. read(md5, list_chapters=true) → see the table of contents
+4. read(md5, chapter=3) → read chapter 3
+5. read(md5, start_page=11, end_page=20) → or fall back to page ranges`,
       inputSchema: {
         md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
-        start_page: z.number().min(1).optional().describe("First page to return (1-indexed). Omit to get document overview."),
-        end_page: z.number().min(1).optional().describe("Last page to return (inclusive). Omit to read from start_page to the cap."),
+        start_page: z.number().min(1).optional().describe("First page to return (1-indexed). Omit to get document overview. Mutually exclusive with chapter."),
+        end_page: z.number().min(1).optional().describe("Last page to return (inclusive). Omit to read 20 pages from start_page."),
+        chapter: z.number().min(1).optional().describe("Read a specific chapter by its index (1-based, from the detected TOC). Use list_chapters first to see what's available. Mutually exclusive with start_page/end_page."),
+        list_chapters: z.boolean().optional().describe("If true, returns the detected chapter list (titles + page ranges) instead of text."),
       },
     },
-    async ({ md5, start_page, end_page }) => {
+    async ({ md5, start_page, end_page, chapter, list_chapters }) => {
       const doc = await getByMd5(md5);
       const ext = doc?.extension || "pdf";
 
-      let pageRange: string | undefined;
-      if (start_page != null) {
-        if (end_page != null) {
-          pageRange = `${start_page}-${end_page}`;
-        } else {
-          pageRange = `${start_page}-${start_page + 19}`;
-        }
+      const opts: { pageRange?: string; chapter?: number; listChapters?: boolean } = {};
+      if (list_chapters) {
+        opts.listChapters = true;
+      } else if (chapter != null) {
+        opts.chapter = chapter;
+      } else if (start_page != null) {
+        opts.pageRange = end_page != null
+          ? `${start_page}-${end_page}`
+          : `${start_page}-${start_page + 19}`;
       }
 
-      const result = await readDocument(md5, ext, secretKey || "", pageRange);
+      const result = await readDocument(md5, ext, secretKey || "", opts);
 
       if (result.error) {
         return { content: [{ type: "text", text: `Read failed: ${result.error}` }], isError: true };

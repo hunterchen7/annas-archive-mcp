@@ -28,10 +28,24 @@ const diskTextCache = USE_DISK
   : null;
 const memTextCache = USE_DISK ? null : new MemoryTextCache(TEXT_CACHE_MB * 1024 * 1024);
 
+interface Chapter {
+  index: number;
+  title: string;
+  startPage: number;
+  endPage: number;
+}
+
+export interface ReadOptions {
+  pageRange?: string;
+  chapter?: number;
+  listChapters?: boolean;
+}
+
 interface ReadResult {
   text?: string;
   pageCount?: number;
   format?: string;
+  chapters?: Chapter[];
   error?: string;
 }
 
@@ -190,11 +204,155 @@ function extractPdf(filePath: string): string {
   });
 }
 
-function extractEpub(filePath: string): string {
+// Invisible sentinel used to embed native EPUB chapter titles inline in the
+// extracted text. Stays part of the cached string so chapter structure
+// survives memory/disk cache hits without a sidecar. Detected in
+// detectChapters() and stripped when rendering output.
+// Uses Unicode private-use chars — effectively impossible to collide with
+// natural text.
+const NATIVE_CHAPTER_SENTINEL = "CH";
+
+function stripHtmlToText(html: string): string {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#?\w+;/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+interface EpubToc {
+  opfDir: string;
+  spine: string[]; // idrefs in reading order
+  manifest: Map<string, string>; // id → href
+  titleByHref: Map<string, string>; // href → chapter title from nav/NCX
+}
+
+// Parses an unzipped EPUB's metadata (container.xml → OPF → NCX/nav) to
+// recover the spine + chapter titles. Returns null if anything essential
+// is missing or malformed — caller falls back to blind HTML concatenation.
+function parseEpubToc(tmpDir: string): EpubToc | null {
   try {
-    const tmpDir = `/tmp/epub_${Date.now()}`;
+    const containerPath = path.join(tmpDir, "META-INF", "container.xml");
+    if (!fs.existsSync(containerPath)) return null;
+    const container = fs.readFileSync(containerPath, "utf-8");
+    const opfMatch = container.match(/<rootfile[^>]+full-path=["']([^"']+)["']/i);
+    if (!opfMatch) return null;
+    const opfPath = path.join(tmpDir, opfMatch[1]);
+    if (!fs.existsSync(opfPath)) return null;
+    const opfDir = path.dirname(opfPath);
+    const opf = fs.readFileSync(opfPath, "utf-8");
+
+    const manifest = new Map<string, string>();
+    const allItems: { id: string; href: string; attrs: string }[] = [];
+    const itemRx = /<item\s+([^>]+?)\/?>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = itemRx.exec(opf)) !== null) {
+      const attrs = m[1];
+      const id = attrs.match(/\bid=["']([^"']+)["']/)?.[1];
+      const href = attrs.match(/\bhref=["']([^"']+)["']/)?.[1];
+      if (id && href) {
+        manifest.set(id, href);
+        allItems.push({ id, href, attrs });
+      }
+    }
+
+    const spine: string[] = [];
+    const spineRx = /<itemref\s+([^>]+?)\/?>/gi;
+    while ((m = spineRx.exec(opf)) !== null) {
+      const idref = m[1].match(/\bidref=["']([^"']+)["']/)?.[1];
+      if (idref) spine.push(idref);
+    }
+    if (spine.length === 0) return null;
+
+    const titleByHref = new Map<string, string>();
+
+    // EPUB3 nav document: manifest item with properties="nav"
+    const navItem = allItems.find((i) => /\bproperties=["'][^"']*\bnav\b[^"']*["']/i.test(i.attrs));
+    if (navItem) {
+      const navPath = path.join(opfDir, navItem.href);
+      if (fs.existsSync(navPath)) {
+        const nav = fs.readFileSync(navPath, "utf-8");
+        const tocMatch = nav.match(/<nav\b[^>]*epub:type=["'][^"']*\btoc\b[^"']*["'][^>]*>([\s\S]*?)<\/nav>/i);
+        const section = tocMatch ? tocMatch[1] : nav;
+        const navDir = path.dirname(navItem.href);
+        const linkRx = /<a\b[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+        while ((m = linkRx.exec(section)) !== null) {
+          const rawHref = m[1].split("#")[0];
+          if (!rawHref) continue;
+          // Resolve relative to nav file, then make relative to opfDir to match manifest hrefs
+          const resolved = path.posix.normalize(path.posix.join(navDir, rawHref));
+          const title = stripHtmlToText(m[2]);
+          if (title && !titleByHref.has(resolved)) titleByHref.set(resolved, title);
+          // Also register the raw href as-is, in case the TOC uses the same pathing style as the manifest
+          if (title && !titleByHref.has(rawHref)) titleByHref.set(rawHref, title);
+        }
+      }
+    }
+
+    // EPUB2 NCX fallback
+    if (titleByHref.size === 0) {
+      const ncxItem = allItems.find((i) => /media-type=["']application\/x-dtbncx\+xml["']/i.test(i.attrs));
+      if (ncxItem) {
+        const ncxPath = path.join(opfDir, ncxItem.href);
+        if (fs.existsSync(ncxPath)) {
+          const ncx = fs.readFileSync(ncxPath, "utf-8");
+          const ncxDir = path.dirname(ncxItem.href);
+          const npRx = /<navPoint\b[^>]*>([\s\S]*?)<\/navPoint>/gi;
+          while ((m = npRx.exec(ncx)) !== null) {
+            const inner = m[1];
+            const textMatch = inner.match(/<navLabel>\s*<text>([\s\S]*?)<\/text>/i);
+            const srcMatch = inner.match(/<content\s+src=["']([^"']+)["']/i);
+            if (textMatch && srcMatch) {
+              const rawHref = srcMatch[1].split("#")[0];
+              if (!rawHref) continue;
+              const resolved = path.posix.normalize(path.posix.join(ncxDir, rawHref));
+              const title = stripHtmlToText(textMatch[1]);
+              if (title && !titleByHref.has(resolved)) titleByHref.set(resolved, title);
+              if (title && !titleByHref.has(rawHref)) titleByHref.set(rawHref, title);
+            }
+          }
+        }
+      }
+    }
+
+    return { opfDir, spine, manifest, titleByHref };
+  } catch {
+    return null;
+  }
+}
+
+function extractEpub(filePath: string): string {
+  const tmpDir = `/tmp/epub_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  try {
     execSync(`rm -rf "${tmpDir}" && mkdir -p "${tmpDir}" && unzip -o -q "${filePath}" -d "${tmpDir}" 2>/dev/null || true`);
 
+    const toc = parseEpubToc(tmpDir);
+    if (toc) {
+      let text = "";
+      for (const idref of toc.spine) {
+        const href = toc.manifest.get(idref);
+        if (!href) continue;
+        const itemPath = path.join(toc.opfDir, href);
+        if (!fs.existsSync(itemPath)) continue;
+
+        const title = toc.titleByHref.get(href) || toc.titleByHref.get(path.posix.normalize(href));
+        if (title) {
+          text += `\n\n${NATIVE_CHAPTER_SENTINEL}${title}\n\n`;
+        }
+        const stripped = stripHtmlToText(fs.readFileSync(itemPath, "utf-8"));
+        if (stripped) text += stripped + "\n\n";
+      }
+      if (text.trim()) return text;
+    }
+
+    // Fallback: blind sorted concatenation (original behavior)
     const htmlFiles = execSync(
       `find "${tmpDir}" -name "*.html" -o -name "*.xhtml" -o -name "*.htm" | sort`,
       { encoding: "utf-8" }
@@ -202,26 +360,14 @@ function extractEpub(filePath: string): string {
 
     let text = "";
     for (const htmlFile of htmlFiles) {
-      const html = fs.readFileSync(htmlFile, "utf-8");
-      const stripped = html
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#?\w+;/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
+      const stripped = stripHtmlToText(fs.readFileSync(htmlFile, "utf-8"));
       if (stripped) text += stripped + "\n\n";
     }
-
-    execSync(`rm -rf "${tmpDir}"`);
     return text;
   } catch {
     return "[Failed to extract EPUB text]";
+  } finally {
+    try { execSync(`rm -rf "${tmpDir}"`); } catch { /* already gone */ }
   }
 }
 
@@ -308,6 +454,80 @@ function extractText(filePath: string, format: string): string {
   }
 }
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Matches a sentinel marker followed by the chapter title up to the next newline
+const NATIVE_MARKER_RX = new RegExp(escapeRegex(NATIVE_CHAPTER_SENTINEL) + "([^\\n\\r]+)", "g");
+
+// Removes embedded sentinels from text destined for the user. Done only at
+// render time so that detectChapters (which operates on the same `pages`
+// array) can still see them.
+function stripNativeMarkers(text: string): string {
+  return text.replace(NATIVE_MARKER_RX, "$1");
+}
+
+// Chapter detection. First looks for embedded native sentinels (EPUB with
+// parsed spine + TOC); if none found, falls back to a heuristic regex that
+// scans page tops for "Chapter N", "Part II", "Prologue", "Appendix A", etc.
+function detectChapters(pages: string[]): Chapter[] {
+  // Pass 1: native EPUB chapter sentinels
+  const nativeMarkers: { page: number; title: string }[] = [];
+  for (let p = 0; p < pages.length; p++) {
+    NATIVE_MARKER_RX.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = NATIVE_MARKER_RX.exec(pages[p])) !== null) {
+      const title = m[1].trim();
+      if (!title) continue;
+      if (!nativeMarkers.length || nativeMarkers[nativeMarkers.length - 1].page !== p + 1) {
+        nativeMarkers.push({ page: p + 1, title });
+      }
+    }
+  }
+  if (nativeMarkers.length >= 2) {
+    return nativeMarkers.map((m, i) => ({
+      index: i + 1,
+      title: m.title,
+      startPage: m.page,
+      endPage: i + 1 < nativeMarkers.length ? nativeMarkers[i + 1].page - 1 : pages.length,
+    }));
+  }
+
+  // Pass 2: heuristic regex (PDF, other formats)
+  const structuralRx = /^(chapter|part|book|section)\s+(\d{1,3}|[ivxlcdm]{1,6})\b.*$/i;
+  const namedRx = /^(prologue|epilogue|introduction|preface|foreword|conclusion|afterword|acknowledg(?:e)?ments?|references|bibliography|notes|appendix(?:\s+[a-z0-9]{1,3})?)\b.*$/i;
+
+  const markers: { page: number; title: string }[] = [];
+
+  for (let p = 0; p < pages.length; p++) {
+    const raw = pages[p].split("\n");
+    let scanned = 0;
+    for (const rawLine of raw) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      scanned++;
+      if (scanned > 15) break;
+      if (line.length < 3 || line.length > 120) continue;
+
+      if (structuralRx.test(line) || namedRx.test(line)) {
+        if (markers.length > 0 && markers[markers.length - 1].page === p + 1) break;
+        markers.push({ page: p + 1, title: line });
+        break;
+      }
+    }
+  }
+
+  if (markers.length < 2) return [];
+
+  return markers.map((m, i) => ({
+    index: i + 1,
+    title: m.title,
+    startPage: m.page,
+    endPage: i + 1 < markers.length ? markers[i + 1].page - 1 : pages.length,
+  }));
+}
+
 function splitPages(text: string): string[] {
   const ffPages = text.split("\f").filter((p) => p.trim());
   if (ffPages.length > 1) return ffPages;
@@ -364,7 +584,7 @@ export async function readDocument(
   md5: string,
   hintExt: string,
   secretKey: string,
-  pageRange?: string
+  opts: ReadOptions = {}
 ): Promise<ReadResult> {
   let fullText: string;
   let format: string;
@@ -395,13 +615,79 @@ export async function readDocument(
 
   const pages = splitPages(fullText);
   const pageCount = pages.length;
+  const chapters = detectChapters(pages);
 
-  if (!pageRange) {
-    const preview = pages[0]?.slice(0, 2000) || "[Empty document]";
+  if (opts.listChapters) {
+    if (chapters.length === 0) {
+      return {
+        text: `Document: ${pageCount} pages, format: ${format}\n\nNo chapter structure detected. Use start_page/end_page to read specific pages.`,
+        pageCount,
+        format,
+        chapters: [],
+      };
+    }
+    const lines = [
+      `Document: ${pageCount} pages, ${chapters.length} chapters, format: ${format}`,
+      "",
+      "Chapters:",
+    ];
+    for (const c of chapters) {
+      lines.push(`  ${c.index}. ${c.title} (pp. ${c.startPage}-${c.endPage})`);
+    }
+    return { text: lines.join("\n"), pageCount, format, chapters };
+  }
+
+  if (opts.chapter != null) {
+    if (chapters.length === 0) {
+      return {
+        error: `No chapter structure detected in this ${format}. Use start_page/end_page instead, or list_chapters=true to confirm.`,
+      };
+    }
+    const ch = chapters.find((c) => c.index === opts.chapter);
+    if (!ch) {
+      return {
+        error: `Chapter ${opts.chapter} not found. Document has ${chapters.length} chapters (1-${chapters.length}). Use list_chapters=true to see them.`,
+      };
+    }
+
+    const selected = pages.slice(ch.startPage - 1, ch.endPage);
+    let body = selected
+      .map((p, i) => `--- Page ${ch.startPage + i} ---\n${stripNativeMarkers(p)}`)
+      .join("\n\n");
+
+    let truncated = false;
+    if (body.length > MAX_OUTPUT_CHARS) {
+      body = body.slice(0, MAX_OUTPUT_CHARS);
+      truncated = true;
+    }
+
+    const header = `Chapter ${ch.index} of ${chapters.length}: ${ch.title} (pp. ${ch.startPage}-${ch.endPage} of ${pageCount})`;
+    const footer = truncated
+      ? `\n\n[Truncated at ${MAX_OUTPUT_CHARS} chars. Use start_page/end_page within this chapter to continue.]`
+      : "";
     return {
-      text: `Document: ${pageCount} pages, detected format: ${format}\n\n--- Page 1 preview ---\n${preview}\n\n[Request specific pages with the "pages" parameter, e.g. "1-10"]`,
+      text: `${header}\n\n${body}${footer}`,
       pageCount,
       format,
+      chapters,
+    };
+  }
+
+  const pageRange = opts.pageRange;
+
+  if (!pageRange) {
+    const preview = stripNativeMarkers(pages[0] || "").slice(0, 2000) || "[Empty document]";
+    const chapterLine = chapters.length > 0
+      ? `, ${chapters.length} chapters`
+      : "";
+    const chapterHint = chapters.length > 0
+      ? ` Use list_chapters=true for the table of contents or chapter=N to read a chapter.`
+      : "";
+    return {
+      text: `Document: ${pageCount} pages${chapterLine}, detected format: ${format}\n\n--- Page 1 preview ---\n${preview}\n\n[Request specific pages with start_page/end_page.${chapterHint}]`,
+      pageCount,
+      format,
+      chapters,
     };
   }
 
@@ -422,7 +708,7 @@ export async function readDocument(
 
   const selectedPages = pages.slice(startPage, endPage + 1);
   let text = selectedPages
-    .map((p, i) => `--- Page ${startPage + i + 1} ---\n${p}`)
+    .map((p, i) => `--- Page ${startPage + i + 1} ---\n${stripNativeMarkers(p)}`)
     .join("\n\n");
 
   if (text.length > MAX_OUTPUT_CHARS) {
@@ -433,5 +719,6 @@ export async function readDocument(
     text: `Pages ${startPage + 1}-${endPage + 1} of ${pageCount} (${format}):\n\n${text}`,
     pageCount,
     format,
+    chapters,
   };
 }

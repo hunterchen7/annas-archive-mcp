@@ -135,9 +135,15 @@ export async function search(opts: SearchOptions): Promise<Document[]> {
   const rankExpr = rankExprs.length > 0
     ? `, ${rankExprs.join(" + ")} AS rank`
     : "";
+  // Tiebreaker: prefer EPUB over other formats when rank is equal.
+  // Why: PDF and EPUB of the same work typically produce identical ts_rank
+  // (the vector is built from title/author/publisher, not the file), and
+  // EPUB has native chapter structure which makes chapter-based reading
+  // accurate rather than heuristic.
+  const formatPref = "extension = 'epub' DESC";
   const orderBy = rankExprs.length > 0
-    ? "ORDER BY rank DESC"
-    : "ORDER BY date_added DESC NULLS LAST";
+    ? `ORDER BY rank DESC, ${formatPref}`
+    : `ORDER BY ${formatPref}, date_added DESC NULLS LAST`;
 
   const sql = `SELECT ${COLUMNS}${rankExpr}
     FROM documents
@@ -169,7 +175,7 @@ export async function search(opts: SearchOptions): Promise<Document[]> {
         const orSql = `SELECT ${COLUMNS},
             ts_rank(search_vector, to_tsquery('english_unaccent', $1)) AS rank
           FROM documents WHERE ${orConds.join(" AND ")}
-          ORDER BY rank DESC LIMIT $${orIdx}`;
+          ORDER BY rank DESC, extension = 'epub' DESC LIMIT $${orIdx}`;
         orParams.push(limit);
         result = await pool.query(orSql, orParams);
       }
@@ -191,7 +197,7 @@ export async function search(opts: SearchOptions): Promise<Document[]> {
 
       const triSql = `SELECT ${COLUMNS}
         FROM documents WHERE ${triConds.join(" AND ")}
-        ORDER BY greatest(similarity(title, $1), similarity(author, $1)) DESC LIMIT $${triIdx}`;
+        ORDER BY greatest(similarity(title, $1), similarity(author, $1)) DESC, extension = 'epub' DESC LIMIT $${triIdx}`;
       triParams.push(limit);
       result = await pool.query(triSql, triParams);
     }
