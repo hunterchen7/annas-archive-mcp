@@ -4,8 +4,6 @@ import os from "os";
 import { getDownloadUrl } from "./download.js";
 import { FileCache } from "./cache.js";
 import { MemoryTextCache } from "./memoryCache.js";
-import https from "https";
-import http from "http";
 import { keyValidationError, validateKey } from "./auth.js";
 import { runTextCommand } from "./command.js";
 import {
@@ -13,6 +11,7 @@ import {
   listSafeRegularFiles,
   resolveSafeFile,
 } from "./safeArchive.js";
+import { safeDownloadToFile, safeRequest } from "./safeHttp.js";
 
 // CACHE_MODE: "memory" (default) keeps nothing on disk across requests —
 // downloaded files are streamed through a per-request tmp path and unlinked
@@ -23,6 +22,11 @@ const CACHE_DIR = process.env.CACHE_DIR || "/data/cache";
 const FILE_CACHE_MB = parseInt(process.env.FILE_CACHE_MB || "2000", 10);
 const TEXT_CACHE_MB = parseInt(process.env.TEXT_CACHE_MB || "500", 10);
 const MAX_OUTPUT_CHARS = parseInt(process.env.MAX_OUTPUT_CHARS || "50000", 10);
+const configuredDownloadMb = Number.parseInt(process.env.MAX_DOWNLOAD_MB || "200", 10);
+const MAX_DOWNLOAD_BYTES =
+  (Number.isSafeInteger(configuredDownloadMb) && configuredDownloadMb > 0
+    ? Math.min(configuredDownloadMb, 1024)
+    : 200) * 1024 * 1024;
 
 const USE_DISK = CACHE_MODE === "disk";
 const MAX_CONCURRENT_READS = 1;
@@ -148,42 +152,6 @@ function detectFormat(source: string | Buffer): string {
   return "unknown";
 }
 
-function downloadToFile(url: string, dest: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith("https") ? https : http;
-    client.get(url, (res) => {
-      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return downloadToFile(res.headers.location, dest).then(resolve, reject);
-      }
-      if (res.statusCode !== 200) {
-        return reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-      }
-      const stream = fs.createWriteStream(dest);
-      res.pipe(stream);
-      stream.on("finish", () => { stream.close(); resolve(); });
-      stream.on("error", reject);
-    }).on("error", reject);
-  });
-}
-
-function downloadToBuffer(url: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith("https") ? https : http;
-    client.get(url, (res) => {
-      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return downloadToBuffer(res.headers.location).then(resolve, reject);
-      }
-      if (res.statusCode !== 200) {
-        return reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-      }
-      const chunks: Buffer[] = [];
-      res.on("data", (c: Buffer) => chunks.push(c));
-      res.on("end", () => resolve(Buffer.concat(chunks)));
-      res.on("error", reject);
-    }).on("error", reject);
-  });
-}
-
 async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: string; format: string }> {
   // Check cache for any existing file with this md5
   for (const ext of ["pdf", "epub", "djvu", "mobi", "fb2", "docx", "txt", "bin"]) {
@@ -198,7 +166,11 @@ async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: s
 
   // Download to a temp file first, detect format, then rename
   const tmpPath = fileCache!.pathFor(md5, "bin");
-  await downloadToFile(result.downloadUrl, tmpPath);
+  await safeDownloadToFile(result.downloadUrl, tmpPath, {
+    maxBytes: MAX_DOWNLOAD_BYTES,
+    maxRedirects: 3,
+    timeoutMs: 120_000,
+  });
 
   const format = detectFormat(tmpPath);
   const finalPath = fileCache!.pathFor(md5, format);
@@ -590,7 +562,15 @@ async function readInMemory(md5: string, secretKey: string): Promise<{ text: str
     throw new Error(result.error || "No download URL");
   }
 
-  const buf = await downloadToBuffer(result.downloadUrl);
+  const response = await safeRequest(result.downloadUrl, {
+    maxBytes: MAX_DOWNLOAD_BYTES,
+    maxRedirects: 3,
+    timeoutMs: 120_000,
+  });
+  if (response.statusCode !== 200) {
+    throw new Error(`Download failed with HTTP ${response.statusCode}`);
+  }
+  const buf = response.body;
   const format = detectFormat(buf);
   const text = extractTextFromBuffer(buf, format);
   memTextCache!.put(md5, text);

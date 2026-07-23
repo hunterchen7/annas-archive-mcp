@@ -1,7 +1,8 @@
-import https from "https";
 import { KeyVerdictCache } from "./keyCache.js";
+import { safeRequest } from "./safeHttp.js";
 
 const DOMAINS = ["annas-archive.gl", "annas-archive.gd", "annas-archive.pk"];
+const ALLOWED_HOSTS = new Set(DOMAINS);
 const TTL_MS = 15 * 60 * 1000;
 const NEG_TTL_MS = 60 * 1000;
 const MAX_ENTRIES = 10_000;
@@ -43,29 +44,24 @@ export function keyValidationError(
 // POST /account/ with key=<secret>. Valid key → response sets aa_account_id2
 // cookie. Invalid key → no such cookie. This is AA's login form for the
 // "Enter your secret key to log in" flow.
-function probe(domain: string, key: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    const body = `key=${encodeURIComponent(key)}`;
-    const req = https.request({
-      hostname: domain,
-      path: "/account/",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Content-Length": Buffer.byteLength(body),
-        "User-Agent": "Mozilla/5.0",
-      },
-    }, (res) => {
-      const setCookie = res.headers["set-cookie"] || [];
-      const loggedIn = setCookie.some((c) => c.startsWith("aa_account_id2="));
-      res.resume();
-      resolve(loggedIn);
-    });
-    req.on("error", reject);
-    req.setTimeout(10000, () => { req.destroy(); reject(new Error("Timeout")); });
-    req.write(body);
-    req.end();
+async function probe(domain: string, key: string): Promise<boolean> {
+  const body = new URLSearchParams({ key }).toString();
+  const response = await safeRequest(`https://${domain}/account/`, {
+    allowedHosts: ALLOWED_HOSTS,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Length": Buffer.byteLength(body),
+      "User-Agent": "Mozilla/5.0",
+    },
+    body,
+    maxBytes: 2 * 1024 * 1024,
+    timeoutMs: 10_000,
+    maxRedirects: 0,
+    followRedirects: false,
   });
+  const setCookie = response.headers["set-cookie"] || [];
+  return setCookie.some((cookie) => cookie.startsWith("aa_account_id2="));
 }
 
 async function validateUncached(key: string): Promise<ValidationResult> {
