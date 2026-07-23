@@ -7,6 +7,7 @@ import { FileCache } from "./cache.js";
 import { MemoryTextCache } from "./memoryCache.js";
 import https from "https";
 import http from "http";
+import { keyValidationError, validateKey } from "./auth.js";
 
 // CACHE_MODE: "memory" (default) keeps nothing on disk across requests —
 // downloaded files are streamed through a per-request tmp path and unlinked
@@ -586,6 +587,11 @@ export async function readDocument(
   secretKey: string,
   opts: ReadOptions = {}
 ): Promise<ReadResult> {
+  const authError = keyValidationError(await validateKey(secretKey));
+  if (authError) {
+    return { error: authError.message };
+  }
+
   let fullText: string;
   let format: string;
 
