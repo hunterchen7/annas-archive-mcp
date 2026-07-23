@@ -1,13 +1,13 @@
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
-import { execSync, spawnSync } from "child_process";
+import os from "os";
 import { getDownloadUrl } from "./download.js";
 import { FileCache } from "./cache.js";
 import { MemoryTextCache } from "./memoryCache.js";
 import https from "https";
 import http from "http";
 import { keyValidationError, validateKey } from "./auth.js";
+import { runTextCommand } from "./command.js";
 
 // CACHE_MODE: "memory" (default) keeps nothing on disk across requests —
 // downloaded files are streamed through a per-request tmp path and unlinked
@@ -80,11 +80,17 @@ function detectFormat(source: string | Buffer): string {
   if (buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
     if (filePath) {
       try {
-        const output = execSync(`unzip -p "${filePath}" mimetype 2>/dev/null || true`, { encoding: "utf-8" });
+        const output = runTextCommand("unzip", ["-p", filePath, "mimetype"], {
+          timeoutMs: 10_000,
+          maxBufferBytes: 1024 * 1024,
+        });
         if (output.includes("application/epub")) return "epub";
       } catch { /* not epub */ }
       try {
-        const output = execSync(`unzip -l "${filePath}" 2>/dev/null | head -20 || true`, { encoding: "utf-8" });
+        const output = runTextCommand("unzip", ["-Z1", filePath], {
+          timeoutMs: 10_000,
+          maxBufferBytes: 10 * 1024 * 1024,
+        });
         if (output.includes("word/document.xml")) return "docx";
         if (output.includes("[Content_Types].xml")) return "docx";
       } catch { /* not docx */ }
@@ -199,10 +205,7 @@ async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: s
 }
 
 function extractPdf(filePath: string): string {
-  return execSync(`pdftotext -layout "${filePath}" -`, {
-    maxBuffer: 100 * 1024 * 1024,
-    encoding: "utf-8",
-  });
+  return runTextCommand("pdftotext", ["-layout", filePath, "-"]);
 }
 
 // Invisible sentinel used to embed native EPUB chapter titles inline in the
@@ -330,9 +333,9 @@ function parseEpubToc(tmpDir: string): EpubToc | null {
 }
 
 function extractEpub(filePath: string): string {
-  const tmpDir = `/tmp/epub_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aa-epub-"));
   try {
-    execSync(`rm -rf "${tmpDir}" && mkdir -p "${tmpDir}" && unzip -o -q "${filePath}" -d "${tmpDir}" 2>/dev/null || true`);
+    runTextCommand("unzip", ["-o", "-q", filePath, "-d", tmpDir]);
 
     const toc = parseEpubToc(tmpDir);
     if (toc) {
@@ -354,10 +357,19 @@ function extractEpub(filePath: string): string {
     }
 
     // Fallback: blind sorted concatenation (original behavior)
-    const htmlFiles = execSync(
-      `find "${tmpDir}" -name "*.html" -o -name "*.xhtml" -o -name "*.htm" | sort`,
-      { encoding: "utf-8" }
-    ).trim().split("\n").filter(Boolean);
+    const htmlFiles: string[] = [];
+    const pending = [tmpDir];
+    while (pending.length > 0) {
+      const dir = pending.pop()!;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const entryPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) pending.push(entryPath);
+        if (entry.isFile() && /\.(?:x?html?|htm)$/i.test(entry.name)) {
+          htmlFiles.push(entryPath);
+        }
+      }
+    }
+    htmlFiles.sort();
 
     let text = "";
     for (const htmlFile of htmlFiles) {
@@ -368,31 +380,26 @@ function extractEpub(filePath: string): string {
   } catch {
     return "[Failed to extract EPUB text]";
   } finally {
-    try { execSync(`rm -rf "${tmpDir}"`); } catch { /* already gone */ }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
 function extractDjvu(filePath: string): string {
-  return execSync(`djvutxt "${filePath}"`, {
-    maxBuffer: 100 * 1024 * 1024,
-    encoding: "utf-8",
-  });
+  return runTextCommand("djvutxt", [filePath]);
 }
 
 // Universal fallback: calibre's ebook-convert handles MOBI, AZW, AZW3, FB2, LIT, PDB, CBR, CBZ, DOCX, RTF, etc.
 function extractWithCalibre(filePath: string): string {
-  const tmpTxt = `/tmp/calibre_${Date.now()}.txt`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aa-calibre-"));
+  const tmpTxt = path.join(tmpDir, "output.txt");
   try {
-    execSync(`ebook-convert "${filePath}" "${tmpTxt}" 2>/dev/null`, {
-      timeout: 120000,
-      maxBuffer: 100 * 1024 * 1024,
-    });
+    runTextCommand("ebook-convert", [filePath, tmpTxt]);
     const text = fs.readFileSync(tmpTxt, "utf-8");
-    fs.unlinkSync(tmpTxt);
     return text;
   } catch {
-    try { fs.unlinkSync(tmpTxt); } catch { /* ignore */ }
     throw new Error("ebook-convert failed");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
@@ -401,23 +408,21 @@ function extractWithCalibre(filePath: string): string {
 // RAM-backed tmpfs on Linux — never touches persistent storage) and unlink
 // in finally.
 function extractPdfFromBuffer(buf: Buffer): string {
-  const result = spawnSync("pdftotext", ["-layout", "-", "-"], {
+  return runTextCommand("pdftotext", ["-layout", "-", "-"], {
     input: buf,
-    maxBuffer: 100 * 1024 * 1024,
-    encoding: "utf-8",
   });
-  if (result.status !== 0) throw new Error(`pdftotext exited ${result.status}`);
-  return result.stdout || "";
 }
 
 function withShmFile<T>(buf: Buffer, ext: string, fn: (p: string) => T): T {
-  const shmDir = fs.existsSync("/dev/shm") ? "/dev/shm" : "/tmp";
-  const p = path.join(shmDir, `aa-${crypto.randomBytes(8).toString("hex")}.${ext}`);
-  fs.writeFileSync(p, buf);
+  const tempRoot = fs.existsSync("/dev/shm") ? "/dev/shm" : os.tmpdir();
+  const tmpDir = fs.mkdtempSync(path.join(tempRoot, "aa-file-"));
+  const safeExt = /^[a-z0-9]{1,10}$/i.test(ext) ? ext : "bin";
+  const p = path.join(tmpDir, `input.${safeExt}`);
+  fs.writeFileSync(p, buf, { mode: 0o600 });
   try {
     return fn(p);
   } finally {
-    try { fs.unlinkSync(p); } catch { /* already gone */ }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
