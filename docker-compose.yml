@@ -4,12 +4,13 @@ services:
     environment:
       POSTGRES_DB: annas
       POSTGRES_USER: annas
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-annas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./ingest/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./ingest/sync-password.sql:/docker-entrypoint-initdb.d/02-sync-password.sql
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     shm_size: 1gb
     command: >
       postgres
@@ -30,20 +31,40 @@ services:
   mcp-server:
     build: ./server
     restart: unless-stopped
+    init: true
     ports:
-      - "3001:3001"
+      - "127.0.0.1:${MCP_PORT:-3001}:3001"
     environment:
-      DATABASE_URL: postgresql://annas:${POSTGRES_PASSWORD:-annas}@postgres:5432/annas
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: annas
+      PGUSER: annas
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       RATE_LIMIT: ${RATE_LIMIT:-60}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback, linklocal, uniquelocal}
       TRANSPORT: ${TRANSPORT:-http}
       PORT: "3001"
       CACHE_MODE: ${CACHE_MODE:-memory}
       CACHE_DIR: /data/cache
       FILE_CACHE_MB: ${FILE_CACHE_MB:-2000}
-      TEXT_CACHE_MB: ${TEXT_CACHE_MB:-500}
+      TEXT_CACHE_MB: ${TEXT_CACHE_MB:-128}
+      MAX_DOWNLOAD_MB: ${MAX_DOWNLOAD_MB:-128}
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp/.cache
+      XDG_CONFIG_HOME: /tmp/.config
     volumes:
       - cache:/data/cache
-    shm_size: ${MCP_SHM_SIZE:-512m}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: ${MCP_MEMORY_LIMIT:-2g}
+    cpus: ${MCP_CPU_LIMIT:-2.0}
+    shm_size: ${MCP_SHM_SIZE:-256m}
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,7 +72,7 @@ services:
   ingest:
     build: ./ingest
     environment:
-      DATABASE_URL: postgresql://annas:${POSTGRES_PASSWORD:-annas}@postgres:5432/annas
+      DATABASE_URL: postgresql://annas:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/annas
     volumes:
       - aac-data:/data/aac:ro
     depends_on:
@@ -66,6 +87,8 @@ services:
     command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - mcp-server
+    profiles:
+      - tunnel
 
   download:
     build: ./downloader

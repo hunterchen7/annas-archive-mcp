@@ -175,7 +175,7 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
     {
       description: `Read the text content of a document by its MD5 hash. Downloads the file via fast download, extracts text, and returns it page by page OR chapter by chapter. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
 
-Requires an Anna's Archive membership secret key (configured in client headers as X-Annas-Secret-Key) to download files not already cached.
+Requires a currently valid Anna's Archive membership secret key (configured in client headers as X-Annas-Secret-Key) for every read, including cached documents.
 
 BEHAVIOR:
 - No arguments → returns page count, chapter count (if detected), and first page preview. Use this first to understand the document.
