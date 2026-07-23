@@ -389,6 +389,19 @@ function extractWithCalibre(filePath: string): string {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aa-calibre-"));
   const tmpTxt = path.join(tmpDir, "output.txt");
   try {
+    const header = Buffer.alloc(4);
+    const fd = fs.openSync(filePath, "r");
+    const bytesRead = fs.readSync(fd, header, 0, header.length, 0);
+    fs.closeSync(fd);
+    if (
+      bytesRead === 4 &&
+      header[0] === 0x50 &&
+      header[1] === 0x4b &&
+      header[2] === 0x03 &&
+      header[3] === 0x04
+    ) {
+      inspectZipArchive(filePath);
+    }
     runTextCommand("ebook-convert", [filePath, tmpTxt]);
     const text = fs.readFileSync(tmpTxt, "utf-8");
     return text;

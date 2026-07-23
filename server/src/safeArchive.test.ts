@@ -28,7 +28,15 @@ describe("sumZipListingBytes", () => {
       "       12  2026-01-01 00:00   first.xhtml",
       "       34  2026-01-01 00:00   second.xhtml",
     ].join("\n");
-    assert.equal(sumZipListingBytes(listing), 46);
+    assert.equal(sumZipListingBytes(listing, 2), 46);
+    assert.equal(
+      sumZipListingBytes("       46  07-23-2026 12:34   real-infozip-output.epub", 1),
+      46,
+    );
+    assert.throws(
+      () => sumZipListingBytes(listing, 3),
+      /Could not verify every archive entry size/,
+    );
     assert.throws(
       () => sumZipListingBytes("999999999  2026-01-01 00:00   huge.bin"),
       /too large/,

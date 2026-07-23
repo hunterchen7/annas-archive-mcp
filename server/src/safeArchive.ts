@@ -29,11 +29,15 @@ export function validateArchiveEntryNames(names: readonly string[]): void {
   }
 }
 
-export function sumZipListingBytes(listing: string): number {
+export function sumZipListingBytes(listing: string, expectedEntries?: number): number {
   let total = 0;
+  let parsedEntries = 0;
   for (const line of listing.split(/\r?\n/)) {
-    const match = line.match(/^\s*(\d+)\s+\d{2,4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+/);
+    const match = line.match(
+      /^\s*(\d+)\s+(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{2}-\d{4})\s+\d{2}:\d{2}\s+/,
+    );
     if (!match) continue;
+    parsedEntries++;
     const size = Number(match[1]);
     if (!Number.isSafeInteger(size) || size < 0 || size > MAX_ARCHIVE_BYTES) {
       throw new Error("Archive entry is too large");
@@ -42,6 +46,11 @@ export function sumZipListingBytes(listing: string): number {
     if (total > MAX_ARCHIVE_BYTES) {
       throw new Error(`Archive expands beyond ${MAX_ARCHIVE_BYTES} bytes`);
     }
+  }
+  if (expectedEntries !== undefined && parsedEntries !== expectedEntries) {
+    throw new Error(
+      `Could not verify every archive entry size (expected ${expectedEntries}, parsed ${parsedEntries})`,
+    );
   }
   return total;
 }
@@ -65,7 +74,7 @@ export function inspectZipArchive(filePath: string): void {
     timeoutMs: 10_000,
     maxBufferBytes: 10 * 1024 * 1024,
   });
-  sumZipListingBytes(sizeListing);
+  sumZipListingBytes(sizeListing, names.length);
 }
 
 export function resolveSafeFile(

@@ -19,4 +19,17 @@ describe("runTextCommand", () => {
       /status 2/,
     );
   });
+
+  test("does not expose application secrets to parser processes", () => {
+    process.env.PGPASSWORD = "database-secret";
+    try {
+      const output = runTextCommand(process.execPath, [
+        "-e",
+        "process.stdout.write(process.env.PGPASSWORD || '')",
+      ]);
+      assert.equal(output, "");
+    } finally {
+      delete process.env.PGPASSWORD;
+    }
+  });
 });
