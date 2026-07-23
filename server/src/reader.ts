@@ -8,6 +8,11 @@ import https from "https";
 import http from "http";
 import { keyValidationError, validateKey } from "./auth.js";
 import { runTextCommand } from "./command.js";
+import {
+  inspectZipArchive,
+  listSafeRegularFiles,
+  resolveSafeFile,
+} from "./safeArchive.js";
 
 // CACHE_MODE: "memory" (default) keeps nothing on disk across requests —
 // downloaded files are streamed through a per-request tmp path and unlinked
@@ -243,13 +248,13 @@ interface EpubToc {
 // is missing or malformed — caller falls back to blind HTML concatenation.
 function parseEpubToc(tmpDir: string): EpubToc | null {
   try {
-    const containerPath = path.join(tmpDir, "META-INF", "container.xml");
-    if (!fs.existsSync(containerPath)) return null;
+    const containerPath = resolveSafeFile(tmpDir, "META-INF/container.xml");
+    if (!containerPath) return null;
     const container = fs.readFileSync(containerPath, "utf-8");
     const opfMatch = container.match(/<rootfile[^>]+full-path=["']([^"']+)["']/i);
     if (!opfMatch) return null;
-    const opfPath = path.join(tmpDir, opfMatch[1]);
-    if (!fs.existsSync(opfPath)) return null;
+    const opfPath = resolveSafeFile(tmpDir, opfMatch[1]);
+    if (!opfPath) return null;
     const opfDir = path.dirname(opfPath);
     const opf = fs.readFileSync(opfPath, "utf-8");
 
@@ -280,8 +285,8 @@ function parseEpubToc(tmpDir: string): EpubToc | null {
     // EPUB3 nav document: manifest item with properties="nav"
     const navItem = allItems.find((i) => /\bproperties=["'][^"']*\bnav\b[^"']*["']/i.test(i.attrs));
     if (navItem) {
-      const navPath = path.join(opfDir, navItem.href);
-      if (fs.existsSync(navPath)) {
+      const navPath = resolveSafeFile(tmpDir, navItem.href, opfDir);
+      if (navPath) {
         const nav = fs.readFileSync(navPath, "utf-8");
         const tocMatch = nav.match(/<nav\b[^>]*epub:type=["'][^"']*\btoc\b[^"']*["'][^>]*>([\s\S]*?)<\/nav>/i);
         const section = tocMatch ? tocMatch[1] : nav;
@@ -304,8 +309,8 @@ function parseEpubToc(tmpDir: string): EpubToc | null {
     if (titleByHref.size === 0) {
       const ncxItem = allItems.find((i) => /media-type=["']application\/x-dtbncx\+xml["']/i.test(i.attrs));
       if (ncxItem) {
-        const ncxPath = path.join(opfDir, ncxItem.href);
-        if (fs.existsSync(ncxPath)) {
+        const ncxPath = resolveSafeFile(tmpDir, ncxItem.href, opfDir);
+        if (ncxPath) {
           const ncx = fs.readFileSync(ncxPath, "utf-8");
           const ncxDir = path.dirname(ncxItem.href);
           const npRx = /<navPoint\b[^>]*>([\s\S]*?)<\/navPoint>/gi;
@@ -335,7 +340,12 @@ function parseEpubToc(tmpDir: string): EpubToc | null {
 function extractEpub(filePath: string): string {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aa-epub-"));
   try {
+    inspectZipArchive(filePath);
     runTextCommand("unzip", ["-o", "-q", filePath, "-d", tmpDir]);
+    const htmlFiles = listSafeRegularFiles(
+      tmpDir,
+      new Set([".html", ".xhtml", ".htm"]),
+    );
 
     const toc = parseEpubToc(tmpDir);
     if (toc) {
@@ -343,8 +353,8 @@ function extractEpub(filePath: string): string {
       for (const idref of toc.spine) {
         const href = toc.manifest.get(idref);
         if (!href) continue;
-        const itemPath = path.join(toc.opfDir, href);
-        if (!fs.existsSync(itemPath)) continue;
+        const itemPath = resolveSafeFile(tmpDir, href, toc.opfDir);
+        if (!itemPath) continue;
 
         const title = toc.titleByHref.get(href) || toc.titleByHref.get(path.posix.normalize(href));
         if (title) {
@@ -357,20 +367,6 @@ function extractEpub(filePath: string): string {
     }
 
     // Fallback: blind sorted concatenation (original behavior)
-    const htmlFiles: string[] = [];
-    const pending = [tmpDir];
-    while (pending.length > 0) {
-      const dir = pending.pop()!;
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const entryPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) pending.push(entryPath);
-        if (entry.isFile() && /\.(?:x?html?|htm)$/i.test(entry.name)) {
-          htmlFiles.push(entryPath);
-        }
-      }
-    }
-    htmlFiles.sort();
-
     let text = "";
     for (const htmlFile of htmlFiles) {
       const stripped = stripHtmlToText(fs.readFileSync(htmlFile, "utf-8"));
