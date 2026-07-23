@@ -6,10 +6,11 @@ import { keyValidationError, validateKey } from "./auth.js";
 import { takeSecretKey } from "./requestKey.js";
 import { isMd5 } from "./identifiers.js";
 import { parseReadQuery, parseSearchQuery } from "./httpInput.js";
+import { boundedInteger } from "./config.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
-import type { Request, Response, NextFunction } from "express";
+import type { Request, Response, NextFunction, RequestHandler } from "express";
 
 const transport = process.env.TRANSPORT || "http";
 
@@ -20,8 +21,23 @@ if (transport === "stdio") {
   console.error("MCP server running on stdio");
 } else {
   const app = express();
-  app.set("trust proxy", true);
-  app.use(express.json());
+  app.disable("x-powered-by");
+  app.disable("etag");
+  app.set(
+    "trust proxy",
+    process.env.TRUST_PROXY || "loopback, linklocal, uniquelocal",
+  );
+  app.use((_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Strict-Transport-Security", "max-age=31536000");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    next();
+  });
+  app.use(express.json({ limit: "1mb", strict: true }));
 
   app.use((req, res, next) => {
     if (Object.prototype.hasOwnProperty.call(req.query, "aa_key")) {
@@ -35,23 +51,21 @@ if (transport === "stdio") {
 
   // Rate limiting — per IP, in memory
   const RATE_WINDOW_MS = 60_000; // 1 minute
-  const RATE_MAX = parseInt(process.env.RATE_LIMIT || "60", 10); // requests per window
+  const RATE_MAX = boundedInteger(process.env.RATE_LIMIT, 60, 1, 10_000);
+  const MAX_RATE_KEYS = 100_000;
   const hits = new Map<string, { count: number; resetAt: number }>();
 
   // Clean up stale entries every 5 minutes
-  setInterval(() => {
+  const rateCleanupTimer = setInterval(() => {
     const now = Date.now();
     for (const [ip, entry] of hits) {
       if (now > entry.resetAt) hits.delete(ip);
     }
   }, 300_000);
+  rateCleanupTimer.unref();
 
   function getClientIp(req: Request): string {
-    // CF-Connecting-IP is set by Cloudflare to the real client IP
-    return (req.headers["cf-connecting-ip"] as string) ||
-      req.ip ||
-      req.socket.remoteAddress ||
-      "unknown";
+    return req.ip || req.socket.remoteAddress || "unknown";
   }
 
   function rateLimit(req: Request, res: Response, next: NextFunction) {
@@ -60,6 +74,10 @@ if (transport === "stdio") {
     let entry = hits.get(ip);
 
     if (!entry || now > entry.resetAt) {
+      if (!entry && hits.size >= MAX_RATE_KEYS) {
+        const oldest = hits.keys().next().value;
+        if (oldest !== undefined) hits.delete(oldest);
+      }
       entry = { count: 0, resetAt: now + RATE_WINDOW_MS };
       hits.set(ip, entry);
     }
@@ -71,6 +89,7 @@ if (transport === "stdio") {
     res.setHeader("X-RateLimit-Reset", Math.ceil(entry.resetAt / 1000));
 
     if (entry.count > RATE_MAX) {
+      res.setHeader("Retry-After", Math.ceil((entry.resetAt - now) / 1000));
       res.status(429).json({ error: "Rate limit exceeded. Try again in a minute." });
       return;
     }
@@ -78,10 +97,16 @@ if (transport === "stdio") {
     next();
   }
 
+  type AsyncRoute = (req: Request, res: Response, next: NextFunction) => Promise<void>;
+  const asyncRoute = (handler: AsyncRoute): RequestHandler =>
+    (req, res, next) => {
+      void handler(req, res, next).catch(next);
+    };
+
   app.use("/mcp", rateLimit);
 
   // Streamable HTTP transport — fresh server per request (stateless)
-  app.post("/mcp", async (req, res) => {
+  app.post("/mcp", asyncRoute(async (req, res) => {
     if (Array.isArray(req.body)) {
       res.status(400).json({ error: "MCP JSON-RPC batches are not accepted." });
       return;
@@ -107,7 +132,7 @@ if (transport === "stdio") {
       closeRequestResources();
       throw error;
     }
-  });
+  }));
 
   // GET /mcp — required for client discovery/verification
   app.get("/mcp", (_req, res) => {
@@ -124,7 +149,7 @@ if (transport === "stdio") {
   app.use("/api", rateLimit);
 
   // GET /api/search
-  app.get("/api/search", async (req, res) => {
+  app.get("/api/search", asyncRoute(async (req, res) => {
     const authError = keyValidationError(await validateKey(takeSecretKey(req)));
     if (authError) {
       res.status(authError.status).json({ error: authError.message });
@@ -142,10 +167,10 @@ if (transport === "stdio") {
     }
     const results = await search(input);
     res.json({ count: results.length, results });
-  });
+  }));
 
   // GET /api/download/:md5
-  app.get("/api/download/:md5", async (req, res) => {
+  app.get("/api/download/:md5", asyncRoute(async (req, res) => {
     if (!isMd5(req.params.md5)) {
       res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
       return;
@@ -162,10 +187,10 @@ if (transport === "stdio") {
       return;
     }
     res.json({ download_url: result.downloadUrl });
-  });
+  }));
 
   // GET /api/read/:md5
-  app.get("/api/read/:md5", async (req, res) => {
+  app.get("/api/read/:md5", asyncRoute(async (req, res) => {
     if (!isMd5(req.params.md5)) {
       res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
       return;
@@ -196,16 +221,16 @@ if (transport === "stdio") {
       format: result.format,
       chapters: result.chapters,
     });
-  });
+  }));
 
   // GET /api/stats
-  app.get("/api/stats", async (_req, res) => {
+  app.get("/api/stats", asyncRoute(async (_req, res) => {
     const stats = await getStats();
     res.json(stats);
-  });
+  }));
 
   // GET /api/book/:md5 — metadata lookup
-  app.get("/api/book/:md5", async (req, res) => {
+  app.get("/api/book/:md5", asyncRoute(async (req, res) => {
     if (!isMd5(req.params.md5)) {
       res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
       return;
@@ -221,10 +246,37 @@ if (transport === "stdio") {
       return;
     }
     res.json(doc);
+  }));
+
+  app.use((
+    error: unknown,
+    _req: Request,
+    res: Response,
+    _next: NextFunction,
+  ) => {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    const status = typeof error === "object" && error !== null &&
+        "status" in error && (error as { status?: unknown }).status === 400
+      ? 400
+      : 500;
+    if (status === 500) {
+      const message = error instanceof Error ? error.message : "Unknown request failure";
+      console.error(`Unhandled request error: ${message}`);
+    }
+    res.status(status).json({
+      error: status === 400 ? "Invalid JSON request body." : "Internal server error.",
+    });
   });
 
-  const port = parseInt(process.env.PORT || "3001", 10);
-  app.listen(port, "0.0.0.0", () => {
+  const port = boundedInteger(process.env.PORT, 3001, 1, 65_535);
+  const httpServer = app.listen(port, "0.0.0.0", () => {
     console.log(`MCP server listening on http://0.0.0.0:${port}/mcp`);
   });
+  httpServer.headersTimeout = 10_000;
+  httpServer.requestTimeout = 180_000;
+  httpServer.keepAliveTimeout = 5_000;
+  httpServer.maxHeadersCount = 100;
 }
