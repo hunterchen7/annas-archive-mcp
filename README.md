@@ -56,7 +56,7 @@ All parameters are optional and combinable. At least one of `query`, `title`, `a
 git clone https://github.com/hunterchen7/annas-archive-mcp
 cd annas-archive-mcp
 cp .env.example .env
-# Edit .env — set POSTGRES_PASSWORD
+# Edit .env — POSTGRES_PASSWORD is intentionally blank and must be set
 
 # 2. Start Postgres + MCP server
 docker compose up -d
@@ -71,6 +71,31 @@ docker compose --profile ingest run --rm ingest \
 # 5. Verify
 curl http://localhost:3001/health
 ```
+
+### Upgrading an existing installation
+
+PostgreSQL only uses `POSTGRES_PASSWORD` when it creates a new data volume.
+Before starting this version with an existing `pgdata` volume, recreate only
+PostgreSQL with the new environment and then rotate the existing `annas` role:
+
+```bash
+docker compose up -d --no-deps --force-recreate postgres
+docker compose exec -u postgres postgres \
+  psql --dbname postgres \
+  --file /docker-entrypoint-initdb.d/02-sync-password.sql
+```
+
+Older releases also wrote the optional disk cache as root. If you previously
+used `CACHE_MODE=disk`, migrate that named volume once:
+
+```bash
+docker compose run --rm --no-deps --user root --cap-add CHOWN \
+  --entrypoint chown mcp-server -R bun:bun /data/cache
+```
+
+Then run `docker compose up -d`. The `/health` endpoint now verifies the
+database connection, so a password mismatch reports HTTP 503 instead of a
+misleading healthy response.
 
 ## Connecting to MCP Clients
 
@@ -154,7 +179,7 @@ annas-archive-mcp/
 │   │   ├── db.ts               # PostgreSQL queries (FTS, trigram, DOI/ISBN lookup)
 │   │   ├── download.ts         # Anna's Archive API client with domain fallback
 │   │   ├── reader.ts           # Text extraction with format detection and LRU cache
-│   │   ├── auth.ts             # AA secret key validation via POST /account/ with SHA-256-keyed cache
+│   │   ├── auth.ts             # AA key validation with a process-local HMAC verdict cache
 │   │   └── cache.ts            # LRU file cache for downloaded files and extracted text
 │   └── Dockerfile              # Multi-stage Bun build with calibre, poppler, djvulibre
 ├── ingest/                     # Rust ingestion binary
@@ -174,7 +199,7 @@ annas-archive-mcp/
 - **Granular search** — dedicated title, author, year range, publisher, ISBN, and DOI parameters with per-field GIN indexes
 - **AND matching with fallbacks** — multi-word queries require all terms to match; OR fallback for multi-word, trigram for single-word typo correction
 - **Domain fallback** — Anna's Archive domains change frequently; the server tries `gl` → `gd` → `pk` automatically
-- **Client-provided secret key, validated, never persisted** — the AA membership secret key is sent per request via `X-Annas-Secret-Key`. The server validates it against AA's own `POST /account/` login endpoint and caches the verdict for 15 minutes (valid) or 1 minute (invalid). Cache entries use `HMAC-SHA-256` with a random, process-only secret, so fingerprints cannot be correlated across restarts. Plaintext keys are handled transiently for validation and download calls and are not written to disk, the database, or application logs.
+- **Client-provided secret key, validated, never persisted** — the AA membership secret key is sent per request via `X-Annas-Secret-Key`. The server validates it against AA's own `POST /account/` login endpoint and caches the verdict for 15 minutes (valid) or 1 minute (invalid). Cache entries use `HMAC-SHA-256` with a random, process-only secret, so fingerprints cannot be correlated across restarts. Plaintext keys are removed from the request object, retained only for the active request, and cleared from MCP tool closures when the response closes. They are not written to disk, the database, or application logs. JavaScript strings cannot be securely zeroed, and infrastructure that terminates TLS must still be configured not to log secret headers; this is a data-minimization guarantee, not a cryptographic proof.
 
 ## Configuration
 
@@ -192,6 +217,8 @@ annas-archive-mcp/
 | `CLOUDFLARE_TUNNEL_TOKEN` | Named tunnel token for permanent external URL                                    | (none)                                                      |
 | `CACHE_MODE`              | `memory` (nothing on disk) or `disk` (LRU file cache)                            | `memory`                                                    |
 | `MCP_SHM_SIZE`            | `/dev/shm` size for the mcp-server container (memory-mode extractors write here) | `512m`                                                      |
+| `MCP_MEMORY_LIMIT`        | Container memory limit for the MCP server and native parsers                    | `1g`                                                        |
+| `MCP_CPU_LIMIT`           | Container CPU limit for the MCP server and native parsers                       | `2.0`                                                       |
 | `MAX_DOWNLOAD_MB`         | Maximum document download size (hard-capped at 1024 MB)                          | `200`                                                       |
 | `SEED_TIME`               | Seconds to seed after download                                                   | `0`                                                         |
 
@@ -252,10 +279,10 @@ Downloads use the official `fast_download.json` API, which is the sanctioned way
 
 ## Disclaimer
 
-This project provides a search interface over publicly available metadata published by Anna's Archive. It does **not** host, distribute, or store any copyrighted content.
+This project provides a search interface over publicly available metadata published by Anna's Archive. It does **not** serve a permanent public document collection.
 
-- **No copyrighted content is ever written to or stored on disk.** The index holds only bibliographic metadata (titles, authors, ISBNs, etc.) — never file contents.
-- **Downloads pass through Anna's Archive, not this server.** The `download` tool returns a short-lived URL from AA's own `fast_download.json` API; the file is delivered directly from AA to the user.
+- **Cache behavior is explicit.** The default `CACHE_MODE=memory` does not persist downloaded documents. `CACHE_MODE=disk` intentionally stores bounded document and extracted-text caches in the `cache` volume; operators must account for that content in their storage, backup, and retention policies.
+- **The `download` tool does not proxy document bytes.** It returns a short-lived URL from AA's `fast_download.json` API. The `read` tool does download a document to bounded temporary storage, runs text extraction, and removes the temporary file unless disk caching was explicitly enabled.
 - **Access requires an Anna's Archive membership** — both searching and downloading require the user to supply their own AA secret key, which the server validates against Anna's Archive on each first use. This project does not provide, share, or persist secret keys; only a short-lived, process-specific HMAC fingerprint and validation verdict are cached in memory.
 - **No scraping** — search is performed against a local index built from publicly available metadata dumps. We do not scrape or crawl Anna's Archive, in accordance with their robots.txt.
 - **No affiliation** — this project is not affiliated with, endorsed by, or connected to Anna's Archive.

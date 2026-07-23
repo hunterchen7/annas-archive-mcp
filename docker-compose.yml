@@ -8,6 +8,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./ingest/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./ingest/sync-password.sql:/docker-entrypoint-initdb.d/02-sync-password.sql
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     shm_size: 1gb
@@ -61,6 +62,8 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
+    mem_limit: ${MCP_MEMORY_LIMIT:-1g}
+    cpus: ${MCP_CPU_LIMIT:-2.0}
     shm_size: ${MCP_SHM_SIZE:-512m}
     depends_on:
       postgres:
@@ -84,6 +87,8 @@ services:
     command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - mcp-server
+    profiles:
+      - tunnel
 
   download:
     build: ./downloader
