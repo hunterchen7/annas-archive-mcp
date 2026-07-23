@@ -14,6 +14,7 @@ export async function getDownloadUrl(md5: string, secretKey: string): Promise<{ 
   if (!isMd5(md5)) {
     return { error: "Invalid MD5: expected exactly 32 hexadecimal characters." };
   }
+  md5 = md5.toLowerCase();
   const authError = keyValidationError(await validateKey(secretKey));
   if (authError) {
     return { error: authError.message };

@@ -36,6 +36,33 @@ export class FileCache {
       (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
   }
 
+  private normalizeKey(key: string): string {
+    const md5 = key.replace(/\.[^.]+$/, "");
+    const suffix = path.extname(key).slice(1);
+    if (!isMd5(md5) || !/^[a-z0-9]{1,10}$/i.test(suffix)) {
+      throw new Error("Cache key must be a 32-character MD5 plus an extension");
+    }
+    return `${md5.toLowerCase()}.${suffix.toLowerCase()}`;
+  }
+
+  private safeRegularPath(candidate: string): string | null {
+    try {
+      const parent = path.dirname(candidate);
+      const parentStat = fs.lstatSync(parent);
+      if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) return null;
+      const realParent = fs.realpathSync(parent);
+      if (!this.isInsideBase(realParent)) return null;
+
+      const containedCandidate = path.join(realParent, path.basename(candidate));
+      const stat = fs.lstatSync(containedCandidate);
+      if (!stat.isFile() || stat.isSymbolicLink()) return null;
+      const realCandidate = fs.realpathSync(containedCandidate);
+      return this.isInsideBase(realCandidate) ? realCandidate : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Scan existing files on startup to populate the LRU */
   private loadExisting() {
     try {
@@ -51,7 +78,9 @@ export class FileCache {
           if (!stat.isFile() || stat.isSymbolicLink()) continue;
           const realPath = fs.realpathSync(filePath);
           if (!this.isInsideBase(realPath)) continue;
-          this.entries.set(file, {
+          const normalizedKey = file.toLowerCase();
+          if (this.entries.has(normalizedKey)) continue;
+          this.entries.set(normalizedKey, {
             path: realPath,
             size: stat.size,
             accessedAt: stat.atimeMs,
@@ -67,37 +96,29 @@ export class FileCache {
 
   /** Get a cached file path, or null if not cached */
   get(key: string): string | null {
-    const entry = this.entries.get(key);
-    let valid = false;
-    if (entry) {
-      try {
-        const stat = fs.lstatSync(entry.path);
-        valid = stat.isFile() &&
-          !stat.isSymbolicLink() &&
-          this.isInsideBase(fs.realpathSync(entry.path));
-      } catch {
-        valid = false;
-      }
-    }
-    if (!entry || !valid) {
+    const normalizedKey = this.normalizeKey(key);
+    const entry = this.entries.get(normalizedKey);
+    const safePath = entry ? this.safeRegularPath(entry.path) : null;
+    if (!entry || !safePath) {
       if (entry) {
         this.currentSize -= entry.size;
-        this.entries.delete(key);
+        this.entries.delete(normalizedKey);
       }
       return null;
     }
     // Touch — update access time
     entry.accessedAt = Date.now();
-    return entry.path;
+    entry.path = safePath;
+    return safePath;
   }
 
   /** Get the path where a file should be stored (doesn't create it) */
   pathFor(key: string, ext?: string): string {
-    const md5 = key.replace(/\.[^.]+$/, "");
+    const md5 = key.replace(/\.[^.]+$/, "").toLowerCase();
     if (!isMd5(md5)) {
       throw new Error("Cache key must contain a 32-character hexadecimal MD5");
     }
-    const suffix = ext ?? path.extname(key).slice(1);
+    const suffix = (ext ?? path.extname(key).slice(1)).toLowerCase();
     if (!/^[a-z0-9]{1,10}$/i.test(suffix)) {
       throw new Error("Cache extension must contain only letters and numbers");
     }
@@ -116,7 +137,8 @@ export class FileCache {
 
   /** Register a file that was just written to the cache */
   put(key: string, filePath: string) {
-    const expectedPath = this.pathFor(key);
+    const normalizedKey = this.normalizeKey(key);
+    const expectedPath = this.pathFor(normalizedKey);
     if (path.resolve(filePath) !== expectedPath) {
       throw new Error("Cache file path does not match its key");
     }
@@ -124,11 +146,11 @@ export class FileCache {
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw new Error("Cache entry must be a regular file");
     }
-    const existing = this.entries.get(key);
+    const existing = this.entries.get(normalizedKey);
     if (existing) {
       this.currentSize -= existing.size;
     }
-    this.entries.set(key, {
+    this.entries.set(normalizedKey, {
       path: filePath,
       size: stat.size,
       accessedAt: Date.now(),
@@ -148,10 +170,13 @@ export class FileCache {
 
     for (const [key, entry] of sorted) {
       if (this.currentSize <= this.maxBytes * 0.8) break; // Evict to 80% to avoid thrashing
-      try {
-        fs.unlinkSync(entry.path);
-      } catch {
-        // File already gone
+      const safePath = this.safeRegularPath(entry.path);
+      if (safePath) {
+        try {
+          fs.unlinkSync(safePath);
+        } catch {
+          // File already gone
+        }
       }
       this.currentSize -= entry.size;
       this.entries.delete(key);

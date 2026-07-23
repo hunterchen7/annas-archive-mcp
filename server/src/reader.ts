@@ -188,13 +188,14 @@ async function downloadFile(md5: string, secretKey: string): Promise<{ filePath:
 }
 
 async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: string; format: string }> {
-  const pending = pendingFiles.get(md5);
+  const normalizedMd5 = md5.toLowerCase();
+  const pending = pendingFiles.get(normalizedMd5);
   if (pending) return pending;
 
-  const operation = downloadFile(md5, secretKey).finally(() => {
-    pendingFiles.delete(md5);
+  const operation = downloadFile(normalizedMd5, secretKey).finally(() => {
+    pendingFiles.delete(normalizedMd5);
   });
-  pendingFiles.set(md5, operation);
+  pendingFiles.set(normalizedMd5, operation);
   return operation;
 }
 
@@ -598,6 +599,7 @@ export async function readDocument(
   secretKey: string,
   opts: ReadOptions = {}
 ): Promise<ReadResult> {
+  md5 = md5.toLowerCase();
   const authError = keyValidationError(await validateKey(secretKey));
   if (authError) {
     return { error: authError.message };

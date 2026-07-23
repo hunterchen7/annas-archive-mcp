@@ -209,7 +209,7 @@ export async function search(opts: SearchOptions): Promise<Document[]> {
 export async function getByMd5(md5: string): Promise<Document | null> {
   const result = await pool.query(
     `SELECT ${COLUMNS} FROM documents WHERE md5 = $1 LIMIT 1`,
-    [md5]
+    [md5.toLowerCase()]
   );
   return result.rows[0] ?? null;
 }
