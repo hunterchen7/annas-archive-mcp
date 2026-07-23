@@ -1,6 +1,7 @@
 import https from "https";
 import http from "http";
 import { isMd5 } from "./identifiers.js";
+import { keyValidationError, validateKey } from "./auth.js";
 
 const DOMAINS = ["annas-archive.gl", "annas-archive.gd", "annas-archive.pk"];
 
@@ -28,8 +29,9 @@ export async function getDownloadUrl(md5: string, secretKey: string): Promise<{ 
   if (!isMd5(md5)) {
     return { error: "Invalid MD5: expected exactly 32 hexadecimal characters." };
   }
-  if (!secretKey) {
-    return { error: "No secret key provided. An Anna's Archive membership secret key is required for downloads. Configure it via the X-Annas-Secret-Key header in your MCP client settings." };
+  const authError = keyValidationError(await validateKey(secretKey));
+  if (authError) {
+    return { error: authError.message };
   }
 
   let resp: FastDownloadResponse | undefined;

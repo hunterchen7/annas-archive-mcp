@@ -3,7 +3,7 @@ import { z } from "zod";
 import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
-import { validateKey } from "./auth.js";
+import { keyValidationError, validateKey } from "./auth.js";
 import { MD5_PATTERN } from "./identifiers.js";
 
 export interface SecretLease {
@@ -83,14 +83,9 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
       },
     },
     async ({ query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit }) => {
-      const auth = await validateKey(readSecret(secretKey));
-      if (!auth.ok) {
-        const msg = auth.reason === "missing"
-          ? "Search requires an Anna's Archive membership secret key. Configure it via the X-Annas-Secret-Key header in your MCP client settings. Get one at https://annas-archive.gl/account ."
-          : auth.reason === "invalid"
-          ? "Invalid Anna's Archive secret key. Check it at https://annas-archive.gl/account ."
-          : "Could not reach Anna's Archive to validate your key. Try again in a moment.";
-        return { content: [{ type: "text", text: msg }], isError: true };
+      const authError = keyValidationError(await validateKey(readSecret(secretKey)));
+      if (authError) {
+        return { content: [{ type: "text", text: authError.message }], isError: true };
       }
       if (!query && !title && !author && !isbn && !doi) {
         return { content: [{ type: "text", text: "Please provide at least one search parameter: query, title, author, isbn, or doi." }], isError: true };
@@ -135,6 +130,10 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
       },
     },
     async ({ md5 }) => {
+      const authError = keyValidationError(await validateKey(readSecret(secretKey)));
+      if (authError) {
+        return { content: [{ type: "text", text: authError.message }], isError: true };
+      }
       const doc = await getByMd5(md5);
       const result = await getDownloadUrl(md5, readSecret(secretKey));
 
@@ -200,6 +199,10 @@ TYPICAL WORKFLOW:
       },
     },
     async ({ md5, start_page, end_page, chapter, list_chapters }) => {
+      const authError = keyValidationError(await validateKey(readSecret(secretKey)));
+      if (authError) {
+        return { content: [{ type: "text", text: authError.message }], isError: true };
+      }
       const doc = await getByMd5(md5);
       const ext = doc?.extension || "pdf";
 

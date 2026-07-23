@@ -21,6 +21,25 @@ export type ValidationResult =
   | { ok: true }
   | { ok: false; reason: "missing" | "invalid" | "unreachable" };
 
+export function keyValidationError(
+  result: ValidationResult,
+): { status: 401 | 503; message: string } | null {
+  if (result.ok) return null;
+  if (result.reason === "missing") {
+    return {
+      status: 401,
+      message: "An Anna's Archive membership secret key is required. Provide it via the X-Annas-Secret-Key header.",
+    };
+  }
+  if (result.reason === "invalid") {
+    return { status: 401, message: "Invalid Anna's Archive secret key." };
+  }
+  return {
+    status: 503,
+    message: "Could not reach Anna's Archive to validate your key. Try again in a moment.",
+  };
+}
+
 // POST /account/ with key=<secret>. Valid key → response sets aa_account_id2
 // cookie. Invalid key → no such cookie. This is AA's login form for the
 // "Enter your secret key to log in" flow.

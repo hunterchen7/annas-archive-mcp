@@ -2,7 +2,7 @@ import { createServer, type SecretLease } from "./server.js";
 import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
-import { validateKey } from "./auth.js";
+import { keyValidationError, validateKey } from "./auth.js";
 import { takeSecretKey } from "./requestKey.js";
 import { isMd5 } from "./identifiers.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -124,15 +124,9 @@ if (transport === "stdio") {
 
   // GET /api/search
   app.get("/api/search", async (req, res) => {
-    const auth = await validateKey(takeSecretKey(req));
-    if (!auth.ok) {
-      const status = auth.reason === "unreachable" ? 503 : 401;
-      const message = auth.reason === "missing"
-        ? "Search requires an Anna's Archive membership secret key. Provide it via the X-Annas-Secret-Key header."
-        : auth.reason === "invalid"
-        ? "Invalid Anna's Archive secret key."
-        : "Could not reach Anna's Archive to validate your key. Try again in a moment.";
-      res.status(status).json({ error: message });
+    const authError = keyValidationError(await validateKey(takeSecretKey(req)));
+    if (authError) {
+      res.status(authError.status).json({ error: authError.message });
       return;
     }
     const { query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit } = req.query;
@@ -163,6 +157,11 @@ if (transport === "stdio") {
       return;
     }
     const secretKey = takeSecretKey(req);
+    const authError = keyValidationError(await validateKey(secretKey));
+    if (authError) {
+      res.status(authError.status).json({ error: authError.message });
+      return;
+    }
     const result = await getDownloadUrl(req.params.md5, secretKey);
     if (result.error) {
       res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
@@ -178,6 +177,11 @@ if (transport === "stdio") {
       return;
     }
     const secretKey = takeSecretKey(req);
+    const authError = keyValidationError(await validateKey(secretKey));
+    if (authError) {
+      res.status(authError.status).json({ error: authError.message });
+      return;
+    }
     const doc = await getByMd5(req.params.md5);
     const ext = doc?.extension || "pdf";
     const { start_page, end_page, chapter, list_chapters } = req.query;
@@ -220,15 +224,9 @@ if (transport === "stdio") {
       res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
       return;
     }
-    const auth = await validateKey(takeSecretKey(req));
-    if (!auth.ok) {
-      const status = auth.reason === "unreachable" ? 503 : 401;
-      const message = auth.reason === "missing"
-        ? "Metadata lookup requires an Anna's Archive membership secret key. Provide it via the X-Annas-Secret-Key header."
-        : auth.reason === "invalid"
-        ? "Invalid Anna's Archive secret key."
-        : "Could not reach Anna's Archive to validate your key. Try again in a moment.";
-      res.status(status).json({ error: message });
+    const authError = keyValidationError(await validateKey(takeSecretKey(req)));
+    if (authError) {
+      res.status(authError.status).json({ error: authError.message });
       return;
     }
     const doc = await getByMd5(req.params.md5);
