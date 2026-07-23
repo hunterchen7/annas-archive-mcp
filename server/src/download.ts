@@ -1,5 +1,5 @@
 import { isMd5 } from "./identifiers.js";
-import { keyValidationError, validateKey } from "./auth.js";
+import { invalidateKey, keyValidationError, validateKey } from "./auth.js";
 import { assertSafeOutboundUrl, safeRequest } from "./safeHttp.js";
 
 const DOMAINS = ["annas-archive.gl", "annas-archive.gd", "annas-archive.pk"];
@@ -20,7 +20,6 @@ export async function getDownloadUrl(md5: string, secretKey: string): Promise<{ 
   }
 
   let resp: FastDownloadResponse | undefined;
-  let lastError = "";
   for (const domain of DOMAINS) {
     const apiUrl = new URL(`https://${domain}/dyn/api/fast_download.json`);
     apiUrl.searchParams.set("md5", md5);
@@ -37,19 +36,24 @@ export async function getDownloadUrl(md5: string, secretKey: string): Promise<{ 
       resp = JSON.parse(response.body.toString("utf-8"));
       break;
     } catch (e) {
-      lastError = `${e}`;
+      const rawCode = typeof e === "object" && e !== null && "code" in e
+        ? String((e as { code?: unknown }).code)
+        : "request_failed";
+      const code = /^[A-Z0-9_]{1,40}$/i.test(rawCode) ? rawCode : "request_failed";
+      console.error(`Anna's Archive download API request failed for ${domain}: ${code}`);
     }
   }
 
   if (!resp) {
-    return { error: `All domains failed. Last error: ${lastError}` };
+    return { error: "Could not reach Anna's Archive to request a download URL." };
   }
 
   if (resp.error) {
     if (resp.error === "Invalid secret key") {
+      invalidateKey(secretKey);
       return { error: "Invalid secret key. Check that your Anna's Archive membership secret key is correct. You can find it at https://annas-archive.gl/account ." };
     }
-    return { error: resp.error };
+    return { error: "Anna's Archive rejected the download request." };
   }
   if (!resp.download_url) {
     return { error: "No download URL in response" };
