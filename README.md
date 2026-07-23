@@ -182,8 +182,11 @@ annas-archive-mcp/
 
 | Variable                  | Description                                                                      | Default                                                     |
 | ------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `POSTGRES_PASSWORD`       | PostgreSQL password                                                              | `annas`                                                     |
+| `POSTGRES_PASSWORD`       | Required PostgreSQL password (use a long, random URL-safe value)                 | (none)                                                      |
+| `MCP_PORT`                | Loopback-only host port for MCP                                                  | `3001`                                                      |
+| `POSTGRES_PORT`           | Loopback-only host port for PostgreSQL                                           | `5432`                                                      |
 | `RATE_LIMIT`              | Max requests per minute per IP                                                   | `60`                                                        |
+| `TRUST_PROXY`             | Express trusted proxy ranges (default suits the included Docker tunnel)          | `loopback, linklocal, uniquelocal`                          |
 | `TRANSPORT`               | `http` or `stdio`                                                                | `http`                                                      |
 | `COLLECTIONS`             | Comma-separated collection names to download                                     | `zlib3_records,upload_records,ia2_records,nexusstc_records` |
 | `CLOUDFLARE_TUNNEL_TOKEN` | Named tunnel token for permanent external URL                                    | (none)                                                      |
