@@ -1,5 +1,5 @@
 import { createServer, type SecretLease } from "./server.js";
-import { search, getByMd5, getStats } from "./db.js";
+import { search, getByMd5, getStats, pool } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
 import { keyValidationError, validateKey } from "./auth.js";
@@ -37,10 +37,8 @@ if (transport === "stdio") {
     res.setHeader("X-Frame-Options", "DENY");
     next();
   });
-  app.use(express.json({ limit: "1mb", strict: true }));
-
   app.use((req, res, next) => {
-    if (Object.prototype.hasOwnProperty.call(req.query, "aa_key")) {
+    if (Object.keys(req.query).some((key) => key.toLowerCase() === "aa_key")) {
       res.status(400).json({
         error: "Secret keys in URLs are not accepted. Use the X-Annas-Secret-Key header.",
       });
@@ -101,9 +99,22 @@ if (transport === "stdio") {
   const asyncRoute = (handler: AsyncRoute): RequestHandler =>
     (req, res, next) => {
       void handler(req, res, next).catch(next);
-    };
+  };
 
   app.use("/mcp", rateLimit);
+  app.use("/api", rateLimit);
+  app.use(express.json({ limit: "1mb", strict: true }));
+  app.use("/mcp", (_req, res, next) => {
+    const setHeader = res.setHeader;
+    res.setHeader = function (name, value) {
+      return setHeader.call(
+        this,
+        name,
+        name.toLowerCase() === "cache-control" ? "no-store" : value,
+      );
+    };
+    next();
+  });
 
   // Streamable HTTP transport — fresh server per request (stateless)
   app.post("/mcp", asyncRoute(async (req, res) => {
@@ -140,13 +151,16 @@ if (transport === "stdio") {
   });
 
   // Health check
-  app.get("/health", (_req, res) => {
-    res.json({ status: "ok", transport: "http" });
-  });
+  app.get("/health", asyncRoute(async (_req, res) => {
+    try {
+      await pool.query("SELECT 1");
+      res.json({ status: "ok", transport: "http", database: "ok" });
+    } catch {
+      res.status(503).json({ status: "degraded", transport: "http", database: "unavailable" });
+    }
+  }));
 
   // --- REST API ---
-
-  app.use("/api", rateLimit);
 
   // GET /api/search
   app.get("/api/search", asyncRoute(async (req, res) => {
@@ -258,16 +272,27 @@ if (transport === "stdio") {
       res.end();
       return;
     }
-    const status = typeof error === "object" && error !== null &&
-        "status" in error && (error as { status?: unknown }).status === 400
-      ? 400
+    const candidateStatus = typeof error === "object" && error !== null &&
+        "status" in error
+      ? (error as { status?: unknown }).status
+      : undefined;
+    const status = candidateStatus === 400 ||
+        candidateStatus === 413 ||
+        candidateStatus === 415
+      ? candidateStatus
       : 500;
     if (status === 500) {
       const message = error instanceof Error ? error.message : "Unknown request failure";
       console.error(`Unhandled request error: ${message}`);
     }
     res.status(status).json({
-      error: status === 400 ? "Invalid JSON request body." : "Internal server error.",
+      error: status === 400
+        ? "Invalid JSON request body."
+        : status === 413
+        ? "Request body is too large."
+        : status === 415
+        ? "Unsupported request body encoding."
+        : "Internal server error.",
     });
   });
 
