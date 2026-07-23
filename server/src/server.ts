@@ -4,6 +4,7 @@ import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
 import { validateKey } from "./auth.js";
+import { MD5_PATTERN } from "./identifiers.js";
 
 export interface SecretLease {
   value: string;
@@ -130,7 +131,7 @@ Requires an Anna's Archive membership secret key configured in client headers (X
 
 Present the URL as a clickable markdown link. To save locally: curl -L -o filename.ext '<url>'`,
       inputSchema: {
-        md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
+        md5: z.string().regex(MD5_PATTERN).describe("32-character hexadecimal MD5 hash from search results"),
       },
     },
     async ({ md5 }) => {
@@ -191,7 +192,7 @@ TYPICAL WORKFLOW:
 4. read(md5, chapter=3) → read chapter 3
 5. read(md5, start_page=11, end_page=20) → or fall back to page ranges`,
       inputSchema: {
-        md5: z.string().length(32).describe("MD5 hash of the document (from search results)"),
+        md5: z.string().regex(MD5_PATTERN).describe("32-character hexadecimal MD5 hash from search results"),
         start_page: z.number().min(1).optional().describe("First page to return (1-indexed). Omit to get document overview. Mutually exclusive with chapter."),
         end_page: z.number().min(1).optional().describe("Last page to return (inclusive). Omit to read 20 pages from start_page."),
         chapter: z.number().min(1).optional().describe("Read a specific chapter by its index (1-based, from the detected TOC). Use list_chapters first to see what's available. Mutually exclusive with start_page/end_page."),

@@ -4,6 +4,7 @@ import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
 import { validateKey } from "./auth.js";
 import { takeSecretKey } from "./requestKey.js";
+import { isMd5 } from "./identifiers.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
@@ -157,6 +158,10 @@ if (transport === "stdio") {
 
   // GET /api/download/:md5
   app.get("/api/download/:md5", async (req, res) => {
+    if (!isMd5(req.params.md5)) {
+      res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
+      return;
+    }
     const secretKey = takeSecretKey(req);
     const result = await getDownloadUrl(req.params.md5, secretKey);
     if (result.error) {
@@ -168,6 +173,10 @@ if (transport === "stdio") {
 
   // GET /api/read/:md5
   app.get("/api/read/:md5", async (req, res) => {
+    if (!isMd5(req.params.md5)) {
+      res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
+      return;
+    }
     const secretKey = takeSecretKey(req);
     const doc = await getByMd5(req.params.md5);
     const ext = doc?.extension || "pdf";
@@ -207,6 +216,10 @@ if (transport === "stdio") {
 
   // GET /api/book/:md5 — metadata lookup
   app.get("/api/book/:md5", async (req, res) => {
+    if (!isMd5(req.params.md5)) {
+      res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
+      return;
+    }
     const auth = await validateKey(takeSecretKey(req));
     if (!auth.ok) {
       const status = auth.reason === "unreachable" ? 503 : 401;
