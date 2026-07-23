@@ -1,0 +1,35 @@
+name: Server checks
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - ".github/workflows/server-checks.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "server/**"
+      - ".github/workflows/server-checks.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: npm ci
+      - run: bun run check
