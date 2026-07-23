@@ -1,13 +1,18 @@
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
-import { execSync, spawnSync } from "child_process";
+import os from "os";
 import { getDownloadUrl } from "./download.js";
 import { FileCache } from "./cache.js";
 import { MemoryTextCache } from "./memoryCache.js";
 import https from "https";
 import http from "http";
 import { keyValidationError, validateKey } from "./auth.js";
+import { runTextCommand } from "./command.js";
+import {
+  inspectZipArchive,
+  listSafeRegularFiles,
+  resolveSafeFile,
+} from "./safeArchive.js";
 
 // CACHE_MODE: "memory" (default) keeps nothing on disk across requests —
 // downloaded files are streamed through a per-request tmp path and unlinked
@@ -20,6 +25,8 @@ const TEXT_CACHE_MB = parseInt(process.env.TEXT_CACHE_MB || "500", 10);
 const MAX_OUTPUT_CHARS = parseInt(process.env.MAX_OUTPUT_CHARS || "50000", 10);
 
 const USE_DISK = CACHE_MODE === "disk";
+const MAX_CONCURRENT_READS = 1;
+let activeReads = 0;
 
 const fileCache = USE_DISK
   ? new FileCache(path.join(CACHE_DIR, "files"), FILE_CACHE_MB * 1024 * 1024)
@@ -80,11 +87,17 @@ function detectFormat(source: string | Buffer): string {
   if (buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
     if (filePath) {
       try {
-        const output = execSync(`unzip -p "${filePath}" mimetype 2>/dev/null || true`, { encoding: "utf-8" });
+        const output = runTextCommand("unzip", ["-p", filePath, "mimetype"], {
+          timeoutMs: 10_000,
+          maxBufferBytes: 1024 * 1024,
+        });
         if (output.includes("application/epub")) return "epub";
       } catch { /* not epub */ }
       try {
-        const output = execSync(`unzip -l "${filePath}" 2>/dev/null | head -20 || true`, { encoding: "utf-8" });
+        const output = runTextCommand("unzip", ["-Z1", filePath], {
+          timeoutMs: 10_000,
+          maxBufferBytes: 10 * 1024 * 1024,
+        });
         if (output.includes("word/document.xml")) return "docx";
         if (output.includes("[Content_Types].xml")) return "docx";
       } catch { /* not docx */ }
@@ -199,10 +212,7 @@ async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: s
 }
 
 function extractPdf(filePath: string): string {
-  return execSync(`pdftotext -layout "${filePath}" -`, {
-    maxBuffer: 100 * 1024 * 1024,
-    encoding: "utf-8",
-  });
+  return runTextCommand("pdftotext", ["-layout", filePath, "-"]);
 }
 
 // Invisible sentinel used to embed native EPUB chapter titles inline in the
@@ -240,13 +250,13 @@ interface EpubToc {
 // is missing or malformed — caller falls back to blind HTML concatenation.
 function parseEpubToc(tmpDir: string): EpubToc | null {
   try {
-    const containerPath = path.join(tmpDir, "META-INF", "container.xml");
-    if (!fs.existsSync(containerPath)) return null;
+    const containerPath = resolveSafeFile(tmpDir, "META-INF/container.xml");
+    if (!containerPath) return null;
     const container = fs.readFileSync(containerPath, "utf-8");
     const opfMatch = container.match(/<rootfile[^>]+full-path=["']([^"']+)["']/i);
     if (!opfMatch) return null;
-    const opfPath = path.join(tmpDir, opfMatch[1]);
-    if (!fs.existsSync(opfPath)) return null;
+    const opfPath = resolveSafeFile(tmpDir, opfMatch[1]);
+    if (!opfPath) return null;
     const opfDir = path.dirname(opfPath);
     const opf = fs.readFileSync(opfPath, "utf-8");
 
@@ -277,8 +287,8 @@ function parseEpubToc(tmpDir: string): EpubToc | null {
     // EPUB3 nav document: manifest item with properties="nav"
     const navItem = allItems.find((i) => /\bproperties=["'][^"']*\bnav\b[^"']*["']/i.test(i.attrs));
     if (navItem) {
-      const navPath = path.join(opfDir, navItem.href);
-      if (fs.existsSync(navPath)) {
+      const navPath = resolveSafeFile(tmpDir, navItem.href, opfDir);
+      if (navPath) {
         const nav = fs.readFileSync(navPath, "utf-8");
         const tocMatch = nav.match(/<nav\b[^>]*epub:type=["'][^"']*\btoc\b[^"']*["'][^>]*>([\s\S]*?)<\/nav>/i);
         const section = tocMatch ? tocMatch[1] : nav;
@@ -301,8 +311,8 @@ function parseEpubToc(tmpDir: string): EpubToc | null {
     if (titleByHref.size === 0) {
       const ncxItem = allItems.find((i) => /media-type=["']application\/x-dtbncx\+xml["']/i.test(i.attrs));
       if (ncxItem) {
-        const ncxPath = path.join(opfDir, ncxItem.href);
-        if (fs.existsSync(ncxPath)) {
+        const ncxPath = resolveSafeFile(tmpDir, ncxItem.href, opfDir);
+        if (ncxPath) {
           const ncx = fs.readFileSync(ncxPath, "utf-8");
           const ncxDir = path.dirname(ncxItem.href);
           const npRx = /<navPoint\b[^>]*>([\s\S]*?)<\/navPoint>/gi;
@@ -330,9 +340,14 @@ function parseEpubToc(tmpDir: string): EpubToc | null {
 }
 
 function extractEpub(filePath: string): string {
-  const tmpDir = `/tmp/epub_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aa-epub-"));
   try {
-    execSync(`rm -rf "${tmpDir}" && mkdir -p "${tmpDir}" && unzip -o -q "${filePath}" -d "${tmpDir}" 2>/dev/null || true`);
+    inspectZipArchive(filePath);
+    runTextCommand("unzip", ["-o", "-q", filePath, "-d", tmpDir]);
+    const htmlFiles = listSafeRegularFiles(
+      tmpDir,
+      new Set([".html", ".xhtml", ".htm"]),
+    );
 
     const toc = parseEpubToc(tmpDir);
     if (toc) {
@@ -340,8 +355,8 @@ function extractEpub(filePath: string): string {
       for (const idref of toc.spine) {
         const href = toc.manifest.get(idref);
         if (!href) continue;
-        const itemPath = path.join(toc.opfDir, href);
-        if (!fs.existsSync(itemPath)) continue;
+        const itemPath = resolveSafeFile(tmpDir, href, toc.opfDir);
+        if (!itemPath) continue;
 
         const title = toc.titleByHref.get(href) || toc.titleByHref.get(path.posix.normalize(href));
         if (title) {
@@ -354,11 +369,6 @@ function extractEpub(filePath: string): string {
     }
 
     // Fallback: blind sorted concatenation (original behavior)
-    const htmlFiles = execSync(
-      `find "${tmpDir}" -name "*.html" -o -name "*.xhtml" -o -name "*.htm" | sort`,
-      { encoding: "utf-8" }
-    ).trim().split("\n").filter(Boolean);
-
     let text = "";
     for (const htmlFile of htmlFiles) {
       const stripped = stripHtmlToText(fs.readFileSync(htmlFile, "utf-8"));
@@ -368,31 +378,39 @@ function extractEpub(filePath: string): string {
   } catch {
     return "[Failed to extract EPUB text]";
   } finally {
-    try { execSync(`rm -rf "${tmpDir}"`); } catch { /* already gone */ }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
 function extractDjvu(filePath: string): string {
-  return execSync(`djvutxt "${filePath}"`, {
-    maxBuffer: 100 * 1024 * 1024,
-    encoding: "utf-8",
-  });
+  return runTextCommand("djvutxt", [filePath]);
 }
 
 // Universal fallback: calibre's ebook-convert handles MOBI, AZW, AZW3, FB2, LIT, PDB, CBR, CBZ, DOCX, RTF, etc.
 function extractWithCalibre(filePath: string): string {
-  const tmpTxt = `/tmp/calibre_${Date.now()}.txt`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aa-calibre-"));
+  const tmpTxt = path.join(tmpDir, "output.txt");
   try {
-    execSync(`ebook-convert "${filePath}" "${tmpTxt}" 2>/dev/null`, {
-      timeout: 120000,
-      maxBuffer: 100 * 1024 * 1024,
-    });
+    const header = Buffer.alloc(4);
+    const fd = fs.openSync(filePath, "r");
+    const bytesRead = fs.readSync(fd, header, 0, header.length, 0);
+    fs.closeSync(fd);
+    if (
+      bytesRead === 4 &&
+      header[0] === 0x50 &&
+      header[1] === 0x4b &&
+      header[2] === 0x03 &&
+      header[3] === 0x04
+    ) {
+      inspectZipArchive(filePath);
+    }
+    runTextCommand("ebook-convert", [filePath, tmpTxt]);
     const text = fs.readFileSync(tmpTxt, "utf-8");
-    fs.unlinkSync(tmpTxt);
     return text;
   } catch {
-    try { fs.unlinkSync(tmpTxt); } catch { /* ignore */ }
     throw new Error("ebook-convert failed");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
@@ -401,23 +419,21 @@ function extractWithCalibre(filePath: string): string {
 // RAM-backed tmpfs on Linux — never touches persistent storage) and unlink
 // in finally.
 function extractPdfFromBuffer(buf: Buffer): string {
-  const result = spawnSync("pdftotext", ["-layout", "-", "-"], {
+  return runTextCommand("pdftotext", ["-layout", "-", "-"], {
     input: buf,
-    maxBuffer: 100 * 1024 * 1024,
-    encoding: "utf-8",
   });
-  if (result.status !== 0) throw new Error(`pdftotext exited ${result.status}`);
-  return result.stdout || "";
 }
 
 function withShmFile<T>(buf: Buffer, ext: string, fn: (p: string) => T): T {
-  const shmDir = fs.existsSync("/dev/shm") ? "/dev/shm" : "/tmp";
-  const p = path.join(shmDir, `aa-${crypto.randomBytes(8).toString("hex")}.${ext}`);
-  fs.writeFileSync(p, buf);
+  const tempRoot = fs.existsSync("/dev/shm") ? "/dev/shm" : os.tmpdir();
+  const tmpDir = fs.mkdtempSync(path.join(tempRoot, "aa-file-"));
+  const safeExt = /^[a-z0-9]{1,10}$/i.test(ext) ? ext : "bin";
+  const p = path.join(tmpDir, `input.${safeExt}`);
+  fs.writeFileSync(p, buf, { mode: 0o600 });
   try {
     return fn(p);
   } finally {
-    try { fs.unlinkSync(p); } catch { /* already gone */ }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
@@ -591,7 +607,14 @@ export async function readDocument(
   if (authError) {
     return { error: authError.message };
   }
+  if (activeReads >= MAX_CONCURRENT_READS) {
+    return {
+      error: "The document reader is busy. Try again after the current extraction finishes.",
+    };
+  }
+  activeReads++;
 
+  try {
   let fullText: string;
   let format: string;
 
@@ -727,4 +750,7 @@ export async function readDocument(
     format,
     chapters,
   };
+  } finally {
+    activeReads--;
+  }
 }

@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { isMd5 } from "./identifiers.js";
 
 interface CacheEntry {
   path: string;
@@ -66,9 +67,16 @@ export class FileCache {
   /** Get the path where a file should be stored (doesn't create it) */
   pathFor(key: string, ext?: string): string {
     const md5 = key.replace(/\.[^.]+$/, "");
+    if (!isMd5(md5)) {
+      throw new Error("Cache key must contain a 32-character hexadecimal MD5");
+    }
+    const suffix = ext ?? path.extname(key).slice(1);
+    if (!/^[a-z0-9]{1,10}$/i.test(suffix)) {
+      throw new Error("Cache extension must contain only letters and numbers");
+    }
     const subdir = path.join(this.baseDir, md5.slice(0, 2));
     fs.mkdirSync(subdir, { recursive: true });
-    return path.join(subdir, ext ? `${md5}.${ext}` : key);
+    return path.join(subdir, `${md5}.${suffix}`);
   }
 
   /** Register a file that was just written to the cache */
