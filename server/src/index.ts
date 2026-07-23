@@ -5,6 +5,7 @@ import { readDocument } from "./reader.js";
 import { keyValidationError, validateKey } from "./auth.js";
 import { takeSecretKey } from "./requestKey.js";
 import { isMd5 } from "./identifiers.js";
+import { parseReadQuery, parseSearchQuery } from "./httpInput.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
@@ -129,24 +130,17 @@ if (transport === "stdio") {
       res.status(authError.status).json({ error: authError.message });
       return;
     }
-    const { query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit } = req.query;
-    if (!query && !title && !author && !isbn && !doi) {
+    const parsed = parseSearchQuery(req.query);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    const input = parsed.value;
+    if (!input.query && !input.title && !input.author && !input.isbn && !input.doi) {
       res.status(400).json({ error: "Provide at least one of: query, title, author, isbn, doi" });
       return;
     }
-    const results = await search({
-      query: query as string,
-      title: title as string,
-      author: author as string,
-      yearFrom: year_from ? parseInt(year_from as string) : undefined,
-      yearTo: year_to ? parseInt(year_to as string) : undefined,
-      publisher: publisher as string,
-      isbn: isbn as string,
-      doi: doi as string,
-      language: language as string,
-      format: format as string,
-      limit: limit ? Math.min(parseInt(limit as string), 50) : 10,
-    });
+    const results = await search(input);
     res.json({ count: results.length, results });
   });
 
@@ -184,21 +178,13 @@ if (transport === "stdio") {
     }
     const doc = await getByMd5(req.params.md5);
     const ext = doc?.extension || "pdf";
-    const { start_page, end_page, chapter, list_chapters } = req.query;
-
-    const opts: { pageRange?: string; chapter?: number; listChapters?: boolean } = {};
-    if (list_chapters === "true" || list_chapters === "1") {
-      opts.listChapters = true;
-    } else if (chapter) {
-      const c = parseInt(chapter as string);
-      if (Number.isFinite(c) && c >= 1) opts.chapter = c;
-    } else if (start_page) {
-      const sp = parseInt(start_page as string);
-      const ep = end_page ? parseInt(end_page as string) : sp + 19;
-      opts.pageRange = `${sp}-${ep}`;
+    const parsed = parseReadQuery(req.query);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
     }
 
-    const result = await readDocument(req.params.md5, ext, secretKey, opts);
+    const result = await readDocument(req.params.md5, ext, secretKey, parsed.value);
     if (result.error) {
       res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
       return;

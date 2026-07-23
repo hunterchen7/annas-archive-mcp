@@ -69,17 +69,17 @@ FORMAT TIPS (for "read" workflows):
 
 RESULTS include: title, author, year, language, format, file size, MD5 hash, ISBN/DOI if available. Use the MD5 with the download or read tools.`,
       inputSchema: {
-        query: z.string().optional().describe("General full-text search across title, author, and publisher. Use 2-3 key terms, e.g. 'machine learning transformers'. Avoid full sentences."),
-        title: z.string().optional().describe("Full-text search within titles only. e.g. 'Parallax View'. Partial matches work — 'Simulacra' matches 'Simulacra and Simulation'."),
-        author: z.string().optional().describe("Full-text search within authors only. Use surname or full name, e.g. 'Baudrillard' or 'Jean Baudrillard'."),
-        year_from: z.number().optional().describe("Minimum publication year (inclusive). 4-digit year, e.g. 2020."),
-        year_to: z.number().optional().describe("Maximum publication year (inclusive). 4-digit year, e.g. 2024."),
-        publisher: z.string().optional().describe("Full-text search within publishers only. e.g. 'Oxford University Press'."),
-        isbn: z.string().optional().describe("Exact ISBN lookup. 10 or 13 digits, hyphens are stripped automatically. e.g. '978-0-14-044793-4' or '9780140447934'."),
-        doi: z.string().optional().describe("Exact DOI lookup. e.g. '10.1038/nature12345'."),
-        language: z.string().optional().describe("Filter by language. Lowercase English name: 'english', 'chinese', 'french', 'german', 'spanish', 'russian', 'japanese', 'arabic', 'italian', 'portuguese', 'korean'."),
-        format: z.string().optional().describe("Filter by file format. Lowercase extension: 'pdf', 'epub', 'djvu', 'mobi', 'fb2', 'azw3', 'txt', 'docx', 'lit', 'rtf'."),
-        limit: z.number().min(1).max(50).optional().describe("Max results to return. Default 10, max 50. Use higher values for broad searches."),
+        query: z.string().trim().min(1).max(256).optional().describe("General full-text search across title, author, and publisher. Use 2-3 key terms, e.g. 'machine learning transformers'. Avoid full sentences."),
+        title: z.string().trim().min(1).max(256).optional().describe("Full-text search within titles only. e.g. 'Parallax View'. Partial matches work — 'Simulacra' matches 'Simulacra and Simulation'."),
+        author: z.string().trim().min(1).max(256).optional().describe("Full-text search within authors only. Use surname or full name, e.g. 'Baudrillard' or 'Jean Baudrillard'."),
+        year_from: z.number().int().min(0).max(3000).optional().describe("Minimum publication year (inclusive). 4-digit year, e.g. 2020."),
+        year_to: z.number().int().min(0).max(3000).optional().describe("Maximum publication year (inclusive). 4-digit year, e.g. 2024."),
+        publisher: z.string().trim().min(1).max(256).optional().describe("Full-text search within publishers only. e.g. 'Oxford University Press'."),
+        isbn: z.string().trim().min(1).max(32).optional().describe("Exact ISBN lookup. 10 or 13 digits, hyphens are stripped automatically. e.g. '978-0-14-044793-4' or '9780140447934'."),
+        doi: z.string().trim().min(1).max(256).optional().describe("Exact DOI lookup. e.g. '10.1038/nature12345'."),
+        language: z.string().trim().min(1).max(64).optional().describe("Filter by language. Lowercase English name: 'english', 'chinese', 'french', 'german', 'spanish', 'russian', 'japanese', 'arabic', 'italian', 'portuguese', 'korean'."),
+        format: z.string().trim().min(1).max(64).optional().describe("Filter by file format. Lowercase extension: 'pdf', 'epub', 'djvu', 'mobi', 'fb2', 'azw3', 'txt', 'docx', 'lit', 'rtf'."),
+        limit: z.number().int().min(1).max(50).optional().describe("Max results to return. Default 10, max 50. Use higher values for broad searches."),
       },
     },
     async ({ query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit }) => {
@@ -89,6 +89,9 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
       }
       if (!query && !title && !author && !isbn && !doi) {
         return { content: [{ type: "text", text: "Please provide at least one search parameter: query, title, author, isbn, or doi." }], isError: true };
+      }
+      if (year_from !== undefined && year_to !== undefined && year_from > year_to) {
+        return { content: [{ type: "text", text: "year_from must not be greater than year_to." }], isError: true };
       }
       const results = await search({
         query, title, author,
@@ -192,9 +195,9 @@ TYPICAL WORKFLOW:
 5. read(md5, start_page=11, end_page=20) → or fall back to page ranges`,
       inputSchema: {
         md5: z.string().regex(MD5_PATTERN).describe("32-character hexadecimal MD5 hash from search results"),
-        start_page: z.number().min(1).optional().describe("First page to return (1-indexed). Omit to get document overview. Mutually exclusive with chapter."),
-        end_page: z.number().min(1).optional().describe("Last page to return (inclusive). Omit to read 20 pages from start_page."),
-        chapter: z.number().min(1).optional().describe("Read a specific chapter by its index (1-based, from the detected TOC). Use list_chapters first to see what's available. Mutually exclusive with start_page/end_page."),
+        start_page: z.number().int().min(1).max(1_000_000).optional().describe("First page to return (1-indexed). Omit to get document overview. Mutually exclusive with chapter."),
+        end_page: z.number().int().min(1).max(1_000_000).optional().describe("Last page to return (inclusive). Omit to read 20 pages from start_page."),
+        chapter: z.number().int().min(1).max(1_000_000).optional().describe("Read a specific chapter by its index (1-based, from the detected TOC). Use list_chapters first to see what's available. Mutually exclusive with start_page/end_page."),
         list_chapters: z.boolean().optional().describe("If true, returns the detected chapter list (titles + page ranges) instead of text."),
       },
     },
@@ -202,6 +205,23 @@ TYPICAL WORKFLOW:
       const authError = keyValidationError(await validateKey(readSecret(secretKey)));
       if (authError) {
         return { content: [{ type: "text", text: authError.message }], isError: true };
+      }
+      if (end_page !== undefined && start_page === undefined) {
+        return { content: [{ type: "text", text: "end_page requires start_page." }], isError: true };
+      }
+      if (chapter !== undefined && (start_page !== undefined || end_page !== undefined || list_chapters)) {
+        return { content: [{ type: "text", text: "chapter cannot be combined with page ranges or list_chapters." }], isError: true };
+      }
+      if (list_chapters && (start_page !== undefined || end_page !== undefined)) {
+        return { content: [{ type: "text", text: "list_chapters cannot be combined with a page range." }], isError: true };
+      }
+      if (start_page !== undefined && end_page !== undefined) {
+        if (end_page < start_page) {
+          return { content: [{ type: "text", text: "end_page must not be less than start_page." }], isError: true };
+        }
+        if (end_page - start_page + 1 > 100) {
+          return { content: [{ type: "text", text: "A read request can include at most 100 pages." }], isError: true };
+        }
       }
       const doc = await getByMd5(md5);
       const ext = doc?.extension || "pdf";
@@ -214,7 +234,7 @@ TYPICAL WORKFLOW:
       } else if (start_page != null) {
         opts.pageRange = end_page != null
           ? `${start_page}-${end_page}`
-          : `${start_page}-${start_page + 19}`;
+          : `${start_page}-${Math.min(start_page + 19, 1_000_000)}`;
       }
 
       const result = await readDocument(md5, ext, readSecret(secretKey), opts);
