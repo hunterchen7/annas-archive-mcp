@@ -3,6 +3,7 @@ import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
 import { validateKey } from "./auth.js";
+import { takeSecretKey } from "./requestKey.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
@@ -19,6 +20,16 @@ if (transport === "stdio") {
   const app = express();
   app.set("trust proxy", true);
   app.use(express.json());
+
+  app.use((req, res, next) => {
+    if (Object.prototype.hasOwnProperty.call(req.query, "aa_key")) {
+      res.status(400).json({
+        error: "Secret keys in URLs are not accepted. Use the X-Annas-Secret-Key header.",
+      });
+      return;
+    }
+    next();
+  });
 
   // Rate limiting — per IP, in memory
   const RATE_WINDOW_MS = 60_000; // 1 minute
@@ -69,10 +80,7 @@ if (transport === "stdio") {
 
   // Streamable HTTP transport — fresh server per request (stateless)
   app.post("/mcp", async (req, res) => {
-    const secretKey =
-      (req.headers["x-annas-secret-key"] as string) ||
-      (req.query.aa_key as string) ||
-      "";
+    const secretKey = takeSecretKey(req);
     const server = createServer(secretKey);
     const httpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -93,21 +101,15 @@ if (transport === "stdio") {
 
   // --- REST API ---
 
-  function getSecretKey(req: Request): string {
-    return (req.headers["x-annas-secret-key"] as string) ||
-      (req.query.aa_key as string) ||
-      "";
-  }
-
   app.use("/api", rateLimit);
 
   // GET /api/search
   app.get("/api/search", async (req, res) => {
-    const auth = await validateKey(getSecretKey(req));
+    const auth = await validateKey(takeSecretKey(req));
     if (!auth.ok) {
       const status = auth.reason === "unreachable" ? 503 : 401;
       const message = auth.reason === "missing"
-        ? "Search requires an Anna's Archive membership secret key. Provide via X-Annas-Secret-Key header or aa_key query param."
+        ? "Search requires an Anna's Archive membership secret key. Provide it via the X-Annas-Secret-Key header."
         : auth.reason === "invalid"
         ? "Invalid Anna's Archive secret key."
         : "Could not reach Anna's Archive to validate your key. Try again in a moment.";
@@ -137,7 +139,7 @@ if (transport === "stdio") {
 
   // GET /api/download/:md5
   app.get("/api/download/:md5", async (req, res) => {
-    const secretKey = getSecretKey(req);
+    const secretKey = takeSecretKey(req);
     const result = await getDownloadUrl(req.params.md5, secretKey);
     if (result.error) {
       res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
@@ -148,7 +150,7 @@ if (transport === "stdio") {
 
   // GET /api/read/:md5
   app.get("/api/read/:md5", async (req, res) => {
-    const secretKey = getSecretKey(req);
+    const secretKey = takeSecretKey(req);
     const doc = await getByMd5(req.params.md5);
     const ext = doc?.extension || "pdf";
     const { start_page, end_page, chapter, list_chapters } = req.query;
@@ -187,11 +189,11 @@ if (transport === "stdio") {
 
   // GET /api/book/:md5 — metadata lookup
   app.get("/api/book/:md5", async (req, res) => {
-    const auth = await validateKey(getSecretKey(req));
+    const auth = await validateKey(takeSecretKey(req));
     if (!auth.ok) {
       const status = auth.reason === "unreachable" ? 503 : 401;
       const message = auth.reason === "missing"
-        ? "Metadata lookup requires an Anna's Archive membership secret key. Provide via X-Annas-Secret-Key header or aa_key query param."
+        ? "Metadata lookup requires an Anna's Archive membership secret key. Provide it via the X-Annas-Secret-Key header."
         : auth.reason === "invalid"
         ? "Invalid Anna's Archive secret key."
         : "Could not reach Anna's Archive to validate your key. Try again in a moment.";

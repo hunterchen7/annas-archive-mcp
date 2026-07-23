@@ -1,24 +1,20 @@
 import https from "https";
-import { createHash } from "crypto";
+import { KeyVerdictCache } from "./keyCache.js";
 
 const DOMAINS = ["annas-archive.gl", "annas-archive.gd", "annas-archive.pk"];
-const TTL_MS = 60 * 60 * 1000;
-const NEG_TTL_MS = 5 * 60 * 1000;
+const TTL_MS = 15 * 60 * 1000;
+const NEG_TTL_MS = 60 * 1000;
 const MAX_ENTRIES = 10_000;
 
-// Pre-seeded hashes that are always considered valid without probing AA.
-// Each entry is SHA-256(secret_key). Plaintext keys never appear here.
-const TRUSTED_HASHES = new Set<string>([
-  "c4ed4d411496f77deef8887bcec86778aed999fd279bb10ce7dc6fd8db89248a",
-]);
+const cache = new KeyVerdictCache({
+  validTtlMs: TTL_MS,
+  invalidTtlMs: NEG_TTL_MS,
+  maxEntries: MAX_ENTRIES,
+});
 
-// Cache keyed by SHA-256 of the secret so plaintext keys never sit in memory
-// longer than one validation request.
-const cache = new Map<string, { valid: boolean; expiresAt: number }>();
-
-function hashKey(key: string): string {
-  return createHash("sha256").update(key).digest("hex");
-}
+// Expired fingerprints should not linger when traffic is quiet.
+const pruneTimer = setInterval(() => cache.pruneExpired(), NEG_TTL_MS);
+pruneTimer.unref();
 
 export type ValidationResult =
   | { ok: true }
@@ -55,27 +51,16 @@ function probe(domain: string, key: string): Promise<boolean> {
 export async function validateKey(key: string): Promise<ValidationResult> {
   if (!key) return { ok: false, reason: "missing" };
 
-  const hash = hashKey(key);
-  if (TRUSTED_HASHES.has(hash)) return { ok: true };
-
-  const now = Date.now();
-  const cached = cache.get(hash);
-  if (cached && now < cached.expiresAt) {
-    return cached.valid ? { ok: true } : { ok: false, reason: "invalid" };
+  const cached = cache.get(key);
+  if (cached !== undefined) {
+    return cached ? { ok: true } : { ok: false, reason: "invalid" };
   }
 
   let lastError = "";
   for (const domain of DOMAINS) {
     try {
       const valid = await probe(domain, key);
-      if (cache.size >= MAX_ENTRIES) {
-        const firstKey = cache.keys().next().value;
-        if (firstKey !== undefined) cache.delete(firstKey);
-      }
-      cache.set(hash, {
-        valid,
-        expiresAt: now + (valid ? TTL_MS : NEG_TTL_MS),
-      });
+      cache.set(key, valid);
       return valid ? { ok: true } : { ok: false, reason: "invalid" };
     } catch (e) {
       lastError = `${e}`;
@@ -87,5 +72,5 @@ export async function validateKey(key: string): Promise<ValidationResult> {
 }
 
 export function invalidateKey(key: string): void {
-  cache.delete(hashKey(key));
+  cache.delete(key);
 }

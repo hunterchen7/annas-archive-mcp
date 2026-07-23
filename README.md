@@ -110,8 +110,12 @@ docker compose --profile tunnel up -d
 Then in claude.ai: Settings -> Integrations -> Add custom connector:
 
 ```
-URL: https://your-tunnel-url.com/mcp?aa_key=YOUR_AA_SECRET_KEY
+URL: https://your-tunnel-url.com/mcp
+Header: X-Annas-Secret-Key: YOUR_AA_SECRET_KEY
 ```
+
+The connector must support custom headers. Secret keys in URL query parameters
+are rejected because URLs are commonly retained by proxies and request logs.
 
 ## Collections
 
@@ -170,7 +174,7 @@ annas-archive-mcp/
 - **Granular search** — dedicated title, author, year range, publisher, ISBN, and DOI parameters with per-field GIN indexes
 - **AND matching with fallbacks** — multi-word queries require all terms to match; OR fallback for multi-word, trigram for single-word typo correction
 - **Domain fallback** — Anna's Archive domains change frequently; the server tries `gl` → `gd` → `pk` automatically
-- **Client-provided secret key, validated, never persisted** — the AA membership secret key is sent per request via `X-Annas-Secret-Key` (or `aa_key` query param). The server validates it against AA's own `POST /account/` login endpoint and caches the verdict for 1 hour (valid) or 5 minutes (invalid). The cache is keyed by `SHA-256(key)`, so plaintext keys never sit in memory beyond a single validation call. No disk, no database, no logs.
+- **Client-provided secret key, validated, never persisted** — the AA membership secret key is sent per request via `X-Annas-Secret-Key`. The server validates it against AA's own `POST /account/` login endpoint and caches the verdict for 15 minutes (valid) or 1 minute (invalid). Cache entries use `HMAC-SHA-256` with a random, process-only secret, so fingerprints cannot be correlated across restarts. Plaintext keys are handled transiently for validation and download calls and are not written to disk, the database, or application logs.
 
 ## Configuration
 
@@ -248,7 +252,7 @@ This project provides a search interface over publicly available metadata publis
 
 - **No copyrighted content is ever written to or stored on disk.** The index holds only bibliographic metadata (titles, authors, ISBNs, etc.) — never file contents.
 - **Downloads pass through Anna's Archive, not this server.** The `download` tool returns a short-lived URL from AA's own `fast_download.json` API; the file is delivered directly from AA to the user.
-- **Access requires an Anna's Archive membership** — both searching and downloading require the user to supply their own AA secret key, which the server validates against Anna's Archive on each first use. This project does not provide, share, or store secret keys; only a transient SHA-256 hash is cached in memory.
+- **Access requires an Anna's Archive membership** — both searching and downloading require the user to supply their own AA secret key, which the server validates against Anna's Archive on each first use. This project does not provide, share, or persist secret keys; only a short-lived, process-specific HMAC fingerprint and validation verdict are cached in memory.
 - **No scraping** — search is performed against a local index built from publicly available metadata dumps. We do not scrape or crawl Anna's Archive, in accordance with their robots.txt.
 - **No affiliation** — this project is not affiliated with, endorsed by, or connected to Anna's Archive.
 - **User responsibility** — users are solely responsible for how they use this tool and for complying with all applicable laws in their jurisdiction.
