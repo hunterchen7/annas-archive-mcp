@@ -25,6 +25,8 @@ const TEXT_CACHE_MB = parseInt(process.env.TEXT_CACHE_MB || "500", 10);
 const MAX_OUTPUT_CHARS = parseInt(process.env.MAX_OUTPUT_CHARS || "50000", 10);
 
 const USE_DISK = CACHE_MODE === "disk";
+const MAX_CONCURRENT_READS = 1;
+let activeReads = 0;
 
 const fileCache = USE_DISK
   ? new FileCache(path.join(CACHE_DIR, "files"), FILE_CACHE_MB * 1024 * 1024)
@@ -605,7 +607,14 @@ export async function readDocument(
   if (authError) {
     return { error: authError.message };
   }
+  if (activeReads >= MAX_CONCURRENT_READS) {
+    return {
+      error: "The document reader is busy. Try again after the current extraction finishes.",
+    };
+  }
+  activeReads++;
 
+  try {
   let fullText: string;
   let format: string;
 
@@ -741,4 +750,7 @@ export async function readDocument(
     format,
     chapters,
   };
+  } finally {
+    activeReads--;
+  }
 }
