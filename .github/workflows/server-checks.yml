@@ -54,12 +54,20 @@ jobs:
             -e POSTGRES_PASSWORD=old-ci-password \
             -v "$PWD/ingest/sync-password.sql:/sync-password.sql:ro" \
             postgres:17-alpine
+          database_ready=false
           for attempt in $(seq 1 30); do
-            if docker exec aa-password-migration pg_isready -U annas -d postgres; then
+            if docker exec --env PGPASSWORD=old-ci-password aa-password-migration \
+              psql --host 127.0.0.1 --username annas --dbname postgres \
+              --command "SELECT 1" >/dev/null 2>&1; then
+              database_ready=true
               break
             fi
             sleep 1
           done
+          if [ "$database_ready" != true ]; then
+            docker logs aa-password-migration
+            exit 1
+          fi
           docker exec --user postgres --env POSTGRES_PASSWORD=new-ci-password \
             aa-password-migration \
             psql --username annas --dbname postgres --file /sync-password.sql
