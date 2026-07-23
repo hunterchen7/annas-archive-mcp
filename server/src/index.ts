@@ -37,16 +37,6 @@ if (transport === "stdio") {
     res.setHeader("X-Frame-Options", "DENY");
     next();
   });
-  app.use((req, res, next) => {
-    if (Object.keys(req.query).some((key) => key.toLowerCase() === "aa_key")) {
-      res.status(400).json({
-        error: "Secret keys in URLs are not accepted. Use the X-Annas-Secret-Key header.",
-      });
-      return;
-    }
-    next();
-  });
-
   // Rate limiting — per IP, in memory
   const RATE_WINDOW_MS = 60_000; // 1 minute
   const RATE_MAX = boundedInteger(process.env.RATE_LIMIT, 60, 1, 10_000);
@@ -103,7 +93,17 @@ if (transport === "stdio") {
 
   app.use("/mcp", rateLimit);
   app.use("/api", rateLimit);
-  app.use(express.json({ limit: "1mb", strict: true }));
+  app.use("/health", rateLimit);
+  app.use((req, res, next) => {
+    if (Object.keys(req.query).some((key) => key.toLowerCase() === "aa_key")) {
+      res.status(400).json({
+        error: "Secret keys in URLs are not accepted. Use the X-Annas-Secret-Key header.",
+      });
+      return;
+    }
+    next();
+  });
+  app.use("/mcp", express.json({ limit: "1mb", strict: true }));
   app.use("/mcp", (_req, res, next) => {
     const setHeader = res.setHeader;
     res.setHeader = function (name, value) {
@@ -151,13 +151,37 @@ if (transport === "stdio") {
   });
 
   // Health check
+  let databaseHealth: { ok: boolean; expiresAt: number } | undefined;
+  let pendingDatabaseHealth: Promise<boolean> | undefined;
+  async function isDatabaseReady(): Promise<boolean> {
+    const now = Date.now();
+    if (databaseHealth && now < databaseHealth.expiresAt) return databaseHealth.ok;
+    if (pendingDatabaseHealth) return pendingDatabaseHealth;
+
+    const check = pool.query("SELECT 1")
+      .then(() => true)
+      .catch(() => false)
+      .then((ok) => {
+        databaseHealth = {
+          ok,
+          expiresAt: Date.now() + (ok ? 5_000 : 2_000),
+        };
+        return ok;
+      })
+      .finally(() => {
+        pendingDatabaseHealth = undefined;
+      });
+    pendingDatabaseHealth = check;
+    return check;
+  }
+
   app.get("/health", asyncRoute(async (_req, res) => {
-    try {
-      await pool.query("SELECT 1");
-      res.json({ status: "ok", transport: "http", database: "ok" });
-    } catch {
-      res.status(503).json({ status: "degraded", transport: "http", database: "unavailable" });
-    }
+    const databaseReady = await isDatabaseReady();
+    res.status(databaseReady ? 200 : 503).json({
+      status: databaseReady ? "ok" : "degraded",
+      transport: "http",
+      database: databaseReady ? "ok" : "unavailable",
+    });
   }));
 
   // --- REST API ---
