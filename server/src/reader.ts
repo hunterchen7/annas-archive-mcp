@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { randomUUID } from "node:crypto";
 import { getDownloadUrl } from "./download.js";
 import { FileCache } from "./cache.js";
 import { MemoryTextCache } from "./memoryCache.js";
@@ -39,6 +40,7 @@ const diskTextCache = USE_DISK
   ? new FileCache(path.join(CACHE_DIR, "text"), TEXT_CACHE_MB * 1024 * 1024)
   : null;
 const memTextCache = USE_DISK ? null : new MemoryTextCache(TEXT_CACHE_MB * 1024 * 1024);
+const pendingFiles = new Map<string, Promise<{ filePath: string; format: string }>>();
 
 interface Chapter {
   index: number;
@@ -152,7 +154,7 @@ function detectFormat(source: string | Buffer): string {
   return "unknown";
 }
 
-async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: string; format: string }> {
+async function downloadFile(md5: string, secretKey: string): Promise<{ filePath: string; format: string }> {
   // Check cache for any existing file with this md5
   for (const ext of ["pdf", "epub", "djvu", "mobi", "fb2", "docx", "txt", "bin"]) {
     const cached = fileCache!.get(`${md5}.${ext}`);
@@ -165,22 +167,35 @@ async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: s
   }
 
   // Download to a temp file first, detect format, then rename
-  const tmpPath = fileCache!.pathFor(md5, "bin");
-  await safeDownloadToFile(result.downloadUrl, tmpPath, {
-    maxBytes: MAX_DOWNLOAD_BYTES,
-    maxRedirects: 3,
-    timeoutMs: 120_000,
-  });
+  const placeholderPath = fileCache!.pathFor(md5, "bin");
+  const tmpPath = `${placeholderPath}.${randomUUID()}.tmp`;
+  try {
+    await safeDownloadToFile(result.downloadUrl, tmpPath, {
+      maxBytes: MAX_DOWNLOAD_BYTES,
+      maxRedirects: 3,
+      timeoutMs: 120_000,
+    });
 
-  const format = detectFormat(tmpPath);
-  const finalPath = fileCache!.pathFor(md5, format);
-
-  if (tmpPath !== finalPath) {
+    const format = detectFormat(tmpPath);
+    const finalPath = fileCache!.pathFor(md5, format);
     fs.renameSync(tmpPath, finalPath);
-  }
 
-  fileCache!.put(`${md5}.${format}`, finalPath);
-  return { filePath: finalPath, format };
+    fileCache!.put(`${md5}.${format}`, finalPath);
+    return { filePath: finalPath, format };
+  } finally {
+    fs.rmSync(tmpPath, { force: true });
+  }
+}
+
+async function ensureFile(md5: string, secretKey: string): Promise<{ filePath: string; format: string }> {
+  const pending = pendingFiles.get(md5);
+  if (pending) return pending;
+
+  const operation = downloadFile(md5, secretKey).finally(() => {
+    pendingFiles.delete(md5);
+  });
+  pendingFiles.set(md5, operation);
+  return operation;
 }
 
 function extractPdf(filePath: string): string {

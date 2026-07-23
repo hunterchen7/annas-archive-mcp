@@ -13,9 +13,16 @@ describe("FileCache.pathFor", () => {
       const md5 = "0123456789abcdef0123456789abcdef";
       const filePath = cache.pathFor(md5, "pdf");
 
-      assert.equal(path.relative(root, filePath), path.join("01", `${md5}.pdf`));
+      assert.equal(
+        path.relative(fs.realpathSync(root), filePath),
+        path.join("01", `${md5}.pdf`),
+      );
       assert.throws(() => cache.pathFor("../../etc/passwd", "pdf"));
       assert.throws(() => cache.pathFor(md5, "../txt"));
+
+      const linkedMd5 = "ab23456789abcdef0123456789abcdef";
+      fs.symlinkSync(os.tmpdir(), path.join(root, "ab"));
+      assert.throws(() => cache.pathFor(linkedMd5, "pdf"), /real directory/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

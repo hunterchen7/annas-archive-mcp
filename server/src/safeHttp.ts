@@ -88,11 +88,35 @@ function parseSafeUrl(rawUrl: string | URL, allowedHosts?: ReadonlySet<string>):
   return url;
 }
 
-async function resolvePublicHost(hostname: string): Promise<PinnedAddress> {
+function remainingTime(deadline: number): number {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("Outbound request timed out");
+  return remaining;
+}
+
+async function resolvePublicHost(hostname: string, deadline: number): Promise<PinnedAddress> {
   const literalFamily = net.isIP(hostname);
-  const addresses = literalFamily
-    ? [{ address: hostname, family: literalFamily }]
-    : await dns.promises.lookup(hostname, { all: true, verbatim: true });
+  let addresses: dns.LookupAddress[];
+  if (literalFamily) {
+    addresses = [{ address: hostname, family: literalFamily }];
+  } else {
+    const timeoutMs = remainingTime(deadline);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      addresses = await Promise.race([
+        dns.promises.lookup(hostname, { all: true, verbatim: true }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Outbound DNS resolution timed out")),
+            timeoutMs,
+          );
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
   if (addresses.length === 0 || addresses.some(({ address }) => !isPublicAddress(address))) {
     throw new Error("Outbound host resolves to a non-public address");
   }
@@ -105,7 +129,7 @@ export async function assertSafeOutboundUrl(
   allowedHosts?: ReadonlySet<string>,
 ): Promise<URL> {
   const url = parseSafeUrl(rawUrl, allowedHosts);
-  await resolvePublicHost(url.hostname);
+  await resolvePublicHost(url.hostname, Date.now() + 30_000);
   return url;
 }
 
@@ -113,10 +137,11 @@ async function openResponse(
   rawUrl: string | URL,
   options: SafeRequestOptions,
   redirectsRemaining: number,
+  deadline: number,
 ): Promise<IncomingMessage> {
   const url = parseSafeUrl(rawUrl, options.allowedHosts);
-  const pinned = await resolvePublicHost(url.hostname);
-  const timeoutMs = options.timeoutMs ?? 30_000;
+  const pinned = await resolvePublicHost(url.hostname, deadline);
+  const timeoutMs = remainingTime(deadline);
 
   const response = await new Promise<IncomingMessage>((resolve, reject) => {
     const request = https.request(url, {
@@ -154,7 +179,12 @@ async function openResponse(
     response.destroy();
     if (redirectsRemaining <= 0) throw new Error("Outbound request exceeded its redirect limit");
     const redirected = new URL(location, url);
-    return openResponse(redirected, { ...options, method: "GET", body: undefined }, redirectsRemaining - 1);
+    return openResponse(
+      redirected,
+      { ...options, method: "GET", body: undefined },
+      redirectsRemaining - 1,
+      deadline,
+    );
   }
   return response;
 }
@@ -173,10 +203,15 @@ export async function safeRequest(
   url: string | URL,
   options: SafeRequestOptions,
 ): Promise<SafeResponse> {
-  const response = await openResponse(url, options, options.maxRedirects ?? 3);
+  const deadline = Date.now() + (options.timeoutMs ?? 30_000);
+  const response = await openResponse(url, options, options.maxRedirects ?? 3, deadline);
   validateContentLength(response, options.maxBytes);
   const chunks: Buffer[] = [];
   let received = 0;
+  const bodyTimer = setTimeout(() => {
+    response.destroy(new Error("Outbound request timed out"));
+  }, Math.max(1, deadline - Date.now()));
+  bodyTimer.unref();
   try {
     for await (const chunk of response) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -190,6 +225,8 @@ export async function safeRequest(
   } catch (error) {
     response.destroy();
     throw error;
+  } finally {
+    clearTimeout(bodyTimer);
   }
   return {
     statusCode: response.statusCode ?? 0,
@@ -203,7 +240,13 @@ export async function safeDownloadToFile(
   destination: string,
   options: Omit<SafeRequestOptions, "method" | "body">,
 ): Promise<void> {
-  const response = await openResponse(url, { ...options, method: "GET" }, options.maxRedirects ?? 3);
+  const deadline = Date.now() + (options.timeoutMs ?? 30_000);
+  const response = await openResponse(
+    url,
+    { ...options, method: "GET" },
+    options.maxRedirects ?? 3,
+    deadline,
+  );
   if (response.statusCode !== 200) {
     response.destroy();
     throw new Error(`Download failed with HTTP ${response.statusCode ?? "unknown"}`);
@@ -212,12 +255,23 @@ export async function safeDownloadToFile(
 
   let handle: fs.promises.FileHandle;
   try {
-    handle = await fs.promises.open(destination, "w", 0o600);
+    handle = await fs.promises.open(
+      destination,
+      fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_NOFOLLOW |
+        fs.constants.O_WRONLY,
+      0o600,
+    );
   } catch (error) {
     response.destroy();
     throw error;
   }
   let received = 0;
+  const bodyTimer = setTimeout(() => {
+    response.destroy(new Error("Outbound request timed out"));
+  }, Math.max(1, deadline - Date.now()));
+  bodyTimer.unref();
   try {
     for await (const chunk of response) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -238,6 +292,8 @@ export async function safeDownloadToFile(
     await handle.close();
     await fs.promises.rm(destination, { force: true });
     throw error;
+  } finally {
+    clearTimeout(bodyTimer);
   }
   await handle.close();
 }
