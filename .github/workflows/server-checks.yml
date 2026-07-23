@@ -4,12 +4,18 @@ on:
   pull_request:
     paths:
       - "server/**"
+      - "docker-compose.yml"
+      - ".env.example"
+      - "ingest/sync-password.sql"
       - ".github/workflows/server-checks.yml"
   push:
     branches:
       - main
     paths:
       - "server/**"
+      - "docker-compose.yml"
+      - ".env.example"
+      - "ingest/sync-password.sql"
       - ".github/workflows/server-checks.yml"
 
 permissions:
@@ -34,3 +40,33 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: docker build --tag annas-archive-mcp:ci .
+      - name: Validate Compose configuration
+        working-directory: .
+        env:
+          POSTGRES_PASSWORD: ci-compose-only-password
+        run: docker compose config --quiet
+      - name: Test existing-volume password rotation
+        working-directory: .
+        run: |
+          docker run -d --name aa-password-migration \
+            -e POSTGRES_DB=annas \
+            -e POSTGRES_USER=annas \
+            -e POSTGRES_PASSWORD=old-ci-password \
+            -v "$PWD/ingest/sync-password.sql:/sync-password.sql:ro" \
+            postgres:17-alpine
+          for attempt in $(seq 1 30); do
+            if docker exec aa-password-migration pg_isready -U annas -d postgres; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec --user postgres --env POSTGRES_PASSWORD=new-ci-password \
+            aa-password-migration \
+            psql --username annas --dbname postgres --file /sync-password.sql
+          docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
+            psql --host 127.0.0.1 --username annas --dbname postgres \
+            --command "SELECT 1"
+      - name: Clean up migration test
+        if: always()
+        working-directory: .
+        run: docker rm --force aa-password-migration 2>/dev/null || true

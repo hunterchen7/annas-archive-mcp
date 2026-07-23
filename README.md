@@ -79,9 +79,9 @@ Before starting this version with an existing `pgdata` volume, recreate only
 PostgreSQL with the new environment and then rotate the existing `annas` role:
 
 ```bash
-docker compose up -d --no-deps --force-recreate postgres
+docker compose up -d --no-deps --force-recreate --wait postgres
 docker compose exec -u postgres postgres \
-  psql --dbname postgres \
+  psql --username annas --dbname postgres \
   --file /docker-entrypoint-initdb.d/02-sync-password.sql
 ```
 
@@ -216,10 +216,10 @@ annas-archive-mcp/
 | `COLLECTIONS`             | Comma-separated collection names to download                                     | `zlib3_records,upload_records,ia2_records,nexusstc_records` |
 | `CLOUDFLARE_TUNNEL_TOKEN` | Named tunnel token for permanent external URL                                    | (none)                                                      |
 | `CACHE_MODE`              | `memory` (nothing on disk) or `disk` (LRU file cache)                            | `memory`                                                    |
-| `MCP_SHM_SIZE`            | `/dev/shm` size for the mcp-server container (memory-mode extractors write here) | `512m`                                                      |
-| `MCP_MEMORY_LIMIT`        | Container memory limit for the MCP server and native parsers                    | `1g`                                                        |
+| `MCP_SHM_SIZE`            | `/dev/shm` size for the mcp-server container (memory-mode extractors write here) | `256m`                                                      |
+| `MCP_MEMORY_LIMIT`        | Container memory limit for the MCP server and native parsers                    | `2g`                                                        |
 | `MCP_CPU_LIMIT`           | Container CPU limit for the MCP server and native parsers                       | `2.0`                                                       |
-| `MAX_DOWNLOAD_MB`         | Maximum document download size (hard-capped at 1024 MB)                          | `200`                                                       |
+| `MAX_DOWNLOAD_MB`         | Maximum document download size (hard-capped at 1024 MB)                          | `128`                                                       |
 | `SEED_TIME`               | Seconds to seed after download                                                   | `0`                                                         |
 
 ### PostgreSQL Tuning

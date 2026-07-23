@@ -21,13 +21,13 @@ import { safeDownloadToFile, safeRequest } from "./safeHttp.js";
 const CACHE_MODE = (process.env.CACHE_MODE || "memory").toLowerCase();
 const CACHE_DIR = process.env.CACHE_DIR || "/data/cache";
 const FILE_CACHE_MB = parseInt(process.env.FILE_CACHE_MB || "2000", 10);
-const TEXT_CACHE_MB = parseInt(process.env.TEXT_CACHE_MB || "500", 10);
+const TEXT_CACHE_MB = parseInt(process.env.TEXT_CACHE_MB || "128", 10);
 const MAX_OUTPUT_CHARS = parseInt(process.env.MAX_OUTPUT_CHARS || "50000", 10);
-const configuredDownloadMb = Number.parseInt(process.env.MAX_DOWNLOAD_MB || "200", 10);
+const configuredDownloadMb = Number.parseInt(process.env.MAX_DOWNLOAD_MB || "128", 10);
 const MAX_DOWNLOAD_BYTES =
   (Number.isSafeInteger(configuredDownloadMb) && configuredDownloadMb > 0
     ? Math.min(configuredDownloadMb, 1024)
-    : 200) * 1024 * 1024;
+    : 128) * 1024 * 1024;
 
 const USE_DISK = CACHE_MODE === "disk";
 const MAX_CONCURRENT_READS = 1;
