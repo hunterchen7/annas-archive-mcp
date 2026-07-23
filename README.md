@@ -189,6 +189,7 @@ annas-archive-mcp/
 | `CLOUDFLARE_TUNNEL_TOKEN` | Named tunnel token for permanent external URL                                    | (none)                                                      |
 | `CACHE_MODE`              | `memory` (nothing on disk) or `disk` (LRU file cache)                            | `memory`                                                    |
 | `MCP_SHM_SIZE`            | `/dev/shm` size for the mcp-server container (memory-mode extractors write here) | `512m`                                                      |
+| `MAX_DOWNLOAD_MB`         | Maximum document download size (hard-capped at 1024 MB)                          | `200`                                                       |
 | `SEED_TIME`               | Seconds to seed after download                                                   | `0`                                                         |
 
 ### PostgreSQL Tuning
