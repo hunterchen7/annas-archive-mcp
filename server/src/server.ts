@@ -5,7 +5,15 @@ import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
 import { validateKey } from "./auth.js";
 
-export function createServer(secretKey?: string): McpServer {
+export interface SecretLease {
+  value: string;
+}
+
+function readSecret(secret: string | SecretLease | undefined): string {
+  return typeof secret === "string" ? secret : secret?.value || "";
+}
+
+export function createServer(secretKey?: string | SecretLease): McpServer {
   const server = new McpServer({
     name: "annas-archive",
     version: "1.0.0",
@@ -74,7 +82,7 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
       },
     },
     async ({ query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit }) => {
-      const auth = await validateKey(secretKey || "");
+      const auth = await validateKey(readSecret(secretKey));
       if (!auth.ok) {
         const msg = auth.reason === "missing"
           ? "Search requires an Anna's Archive membership secret key. Configure it via the X-Annas-Secret-Key header in your MCP client settings. Get one at https://annas-archive.gl/account ."
@@ -127,7 +135,7 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
     },
     async ({ md5 }) => {
       const doc = await getByMd5(md5);
-      const result = await getDownloadUrl(md5, secretKey || "");
+      const result = await getDownloadUrl(md5, readSecret(secretKey));
 
       if (result.error) {
         return { content: [{ type: "text", text: `Download failed: ${result.error}` }], isError: true };
@@ -205,7 +213,7 @@ TYPICAL WORKFLOW:
           : `${start_page}-${start_page + 19}`;
       }
 
-      const result = await readDocument(md5, ext, secretKey || "", opts);
+      const result = await readDocument(md5, ext, readSecret(secretKey), opts);
 
       if (result.error) {
         return { content: [{ type: "text", text: `Read failed: ${result.error}` }], isError: true };

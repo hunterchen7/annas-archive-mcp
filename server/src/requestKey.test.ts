@@ -22,7 +22,7 @@ describe("takeSecretKey", () => {
 
   test("rejects ambiguous repeated header values", () => {
     const req = {
-      headers: { "x-annas-secret-key": ["first", "second"] },
+      headers: { "x-annas-secret-key": "first, second" },
       rawHeaders: [
         "X-Annas-Secret-Key", "first",
         "X-Annas-Secret-Key", "second",
@@ -35,5 +35,16 @@ describe("takeSecretKey", () => {
       "X-Annas-Secret-Key", "[redacted]",
       "X-Annas-Secret-Key", "[redacted]",
     ]);
+  });
+
+  test("rejects an oversized header value", () => {
+    const secret = "x".repeat(513);
+    const req = {
+      headers: { "x-annas-secret-key": secret },
+      rawHeaders: ["X-Annas-Secret-Key", secret],
+    };
+
+    assert.equal(takeSecretKey(req), "");
+    assert.equal(req.rawHeaders[1], "[redacted]");
   });
 });

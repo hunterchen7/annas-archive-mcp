@@ -29,7 +29,7 @@ export class KeyVerdictCache {
   }
 
   get(key: string): boolean | undefined {
-    const fingerprint = this.fingerprint(key);
+    const fingerprint = this.identifier(key);
     const entry = this.entries.get(fingerprint);
     if (!entry) return undefined;
 
@@ -41,7 +41,7 @@ export class KeyVerdictCache {
   }
 
   set(key: string, valid: boolean): void {
-    const fingerprint = this.fingerprint(key);
+    const fingerprint = this.identifier(key);
     this.pruneExpired();
 
     if (!this.entries.has(fingerprint) && this.entries.size >= this.options.maxEntries) {
@@ -58,7 +58,7 @@ export class KeyVerdictCache {
   }
 
   delete(key: string): void {
-    this.entries.delete(this.fingerprint(key));
+    this.entries.delete(this.identifier(key));
   }
 
   pruneExpired(): void {
@@ -72,7 +72,11 @@ export class KeyVerdictCache {
     return this.entries.size;
   }
 
-  private fingerprint(key: string): string {
+  /**
+   * Return a process-local, non-reversible identifier suitable for ephemeral
+   * coordination maps. It changes on every process restart.
+   */
+  identifier(key: string): string {
     return createHmac("sha256", this.secret).update(key).digest("base64url");
   }
 }

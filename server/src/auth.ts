@@ -11,6 +11,7 @@ const cache = new KeyVerdictCache({
   invalidTtlMs: NEG_TTL_MS,
   maxEntries: MAX_ENTRIES,
 });
+const pendingValidations = new Map<string, Promise<ValidationResult>>();
 
 // Expired fingerprints should not linger when traffic is quiet.
 const pruneTimer = setInterval(() => cache.pruneExpired(), NEG_TTL_MS);
@@ -48,14 +49,7 @@ function probe(domain: string, key: string): Promise<boolean> {
   });
 }
 
-export async function validateKey(key: string): Promise<ValidationResult> {
-  if (!key) return { ok: false, reason: "missing" };
-
-  const cached = cache.get(key);
-  if (cached !== undefined) {
-    return cached ? { ok: true } : { ok: false, reason: "invalid" };
-  }
-
+async function validateUncached(key: string): Promise<ValidationResult> {
   let lastError = "";
   for (const domain of DOMAINS) {
     try {
@@ -69,6 +63,25 @@ export async function validateKey(key: string): Promise<ValidationResult> {
 
   console.error(`Key validation unreachable: ${lastError}`);
   return { ok: false, reason: "unreachable" };
+}
+
+export async function validateKey(key: string): Promise<ValidationResult> {
+  if (!key) return { ok: false, reason: "missing" };
+
+  const cached = cache.get(key);
+  if (cached !== undefined) {
+    return cached ? { ok: true } : { ok: false, reason: "invalid" };
+  }
+
+  const identifier = cache.identifier(key);
+  const pending = pendingValidations.get(identifier);
+  if (pending) return pending;
+
+  const validation = validateUncached(key).finally(() => {
+    pendingValidations.delete(identifier);
+  });
+  pendingValidations.set(identifier, validation);
+  return validation;
 }
 
 export function invalidateKey(key: string): void {

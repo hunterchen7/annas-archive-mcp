@@ -1,4 +1,4 @@
-import { createServer } from "./server.js";
+import { createServer, type SecretLease } from "./server.js";
 import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
@@ -80,13 +80,31 @@ if (transport === "stdio") {
 
   // Streamable HTTP transport — fresh server per request (stateless)
   app.post("/mcp", async (req, res) => {
-    const secretKey = takeSecretKey(req);
-    const server = createServer(secretKey);
+    if (Array.isArray(req.body)) {
+      res.status(400).json({ error: "MCP JSON-RPC batches are not accepted." });
+      return;
+    }
+    const secretLease: SecretLease = { value: takeSecretKey(req) };
+    const server = createServer(secretLease);
     const httpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
-    await server.connect(httpTransport);
-    await httpTransport.handleRequest(req, res, req.body);
+    let closed = false;
+    const closeRequestResources = () => {
+      if (closed) return;
+      closed = true;
+      secretLease.value = "";
+      void httpTransport.close().catch(() => {});
+      void server.close().catch(() => {});
+    };
+    res.once("close", closeRequestResources);
+    try {
+      await server.connect(httpTransport);
+      await httpTransport.handleRequest(req, res, req.body);
+    } catch (error) {
+      closeRequestResources();
+      throw error;
+    }
   });
 
   // GET /mcp — required for client discovery/verification
