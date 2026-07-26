@@ -1,9 +1,14 @@
 import express, { type Request, type Response, type Router } from "express";
 import { OAuthError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import type { PostgresOAuthProvider } from "./oauthProvider.js";
+import {
+  oauthCsrfCookieName,
+  type PostgresOAuthProvider,
+} from "./oauthProvider.js";
 
 const MAX_KEY_BYTES = 512;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,256}$/;
+
+class PortalInputError extends Error {}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
@@ -78,6 +83,7 @@ function disclosures(): string {
     <li>Encryption at rest does <strong>not</strong> prevent the running application or an operator who controls both the application and its encryption secret from accessing the key.</li>
     <li>Plaintext can remain in ordinary JavaScript process memory until the request finishes. JavaScript strings cannot be reliably zeroed.</li>
     <li>The application does not intentionally put the key in URLs, cookies, browser storage, application logs, or OAuth tokens. TLS proxies and infrastructure must also be configured not to log request bodies or secret headers.</li>
+    <li>Deleting an active row does not instantly erase encrypted copies from PostgreSQL WAL, replicas, snapshots, or backups. Those copies remain until the operator's retention windows expire, and the global master key can decrypt them while it is retained.</li>
   </ul>
 </section>`;
 }
@@ -85,15 +91,29 @@ function disclosures(): string {
 function linkPage(
   requestToken: string,
   clientName: string,
+  redirectUri: string,
   error?: string,
 ): string {
+  const redirectOrigin = new URL(redirectUri).origin;
   return page(`
 <h1>Link your membership key</h1>
-<p><strong>${escapeHtml(clientName.slice(0, 120))}</strong> is asking to use this Anna's Archive MCP server. There is no account or signup for this server.</p>
+<p>A client using the unverified, self-supplied label <strong>${escapeHtml(clientName.slice(0, 120))}</strong> is asking to use this Anna's Archive MCP server. There is no account or signup for this server.</p>
+<section class="card warning">
+  <h2>Verify the client destination</h2>
+  <p>After linking, the one-time OAuth code will be sent to:</p>
+  <p><code>${escapeHtml(redirectOrigin)}</code></p>
+  <p class="fine">Registered callback: <code>${escapeHtml(redirectUri.slice(0, 2_048))}</code></p>
+  <p>The client label is not verified. Continue only if you recognize and trust this destination. The destination receives OAuth tokens for this MCP server, but it does not receive the Anna's Archive key itself.</p>
+</section>
 ${error ? `<div class="card error">${escapeHtml(error)}</div>` : ""}
 ${disclosures()}
 <form method="post" action="/oauth/link" autocomplete="off">
   <input type="hidden" name="request" value="${escapeHtml(requestToken)}">
+  <label class="choice">
+    <input type="checkbox" name="trust_destination" value="yes" required>
+    <strong>I recognize and trust ${escapeHtml(redirectOrigin)}</strong>
+    <small>I understand that the displayed client name is self-supplied and unverified.</small>
+  </label>
   <label for="key">Anna's Archive membership secret key</label>
   <input id="key" name="key" type="password" maxlength="512" required autocomplete="off" spellcheck="false">
   <p class="fine">This is your Anna's Archive key, not an OAuth client secret. It is never placed in the callback URL.</p>
@@ -121,8 +141,8 @@ function privacyPage(): string {
 ${disclosures()}
 <section class="card">
   <h2>Retention and deletion</h2>
-  <p><strong>Until I disconnect</strong> has no automatic expiry. The encrypted key remains until the client calls OAuth revocation, the same key is relinked for that client, or an operator deletes the connection.</p>
-  <p><strong>One-hour session</strong> creates no refresh token. Its encrypted key is deleted after expiry by the hourly cleanup task (and cleanup also runs on server startup).</p>
+  <p><strong>Until I disconnect</strong> has no automatic expiry after the client completes the OAuth code exchange. Before that exchange, the encrypted record is provisional and expires with the five-minute authorization code. An active connection remains until the client calls OAuth revocation, the same key is relinked for that client, or an operator deletes it.</p>
+  <p><strong>One-hour session</strong> creates no refresh token. Access expires after one hour. Its encrypted row is then deleted by the hourly cleanup task (which also runs on server startup), normally within the following hour and later if the service is not running.</p>
   <p>Legacy <code>X-Annas-Secret-Key</code> requests are not persisted: their key remains request-scoped, apart from a short-lived process-local keyed validation verdict.</p>
 </section>`, "Membership-key handling");
 }
@@ -160,7 +180,11 @@ export function oauthPortalRouter(provider: PostgresOAuthProvider): Router {
         ));
         return;
       }
-      res.type("html").send(linkPage(link.requestToken, link.clientName));
+      res.type("html").send(linkPage(
+        link.requestToken,
+        link.clientName,
+        link.redirectUri,
+      ));
     } catch (error) {
       next(error);
     }
@@ -170,23 +194,31 @@ export function oauthPortalRouter(provider: PostgresOAuthProvider): Router {
     const requestToken = typeof req.body?.request === "string" ? req.body.request : "";
     const membershipKey = typeof req.body?.key === "string" ? req.body.key : "";
     if (req.body && typeof req.body === "object") req.body.key = "[redacted]";
-    const retention = req.body?.retention === "session" ? "session" : "persistent";
+    const retentionValue = req.body?.retention;
+    const trustsDestination = req.body?.trust_destination === "yes";
     try {
       if (
         !TOKEN_PATTERN.test(requestToken) ||
         !membershipKey ||
         Buffer.byteLength(membershipKey) > MAX_KEY_BYTES
       ) {
-        throw new Error("Enter a valid linking request and membership key.");
+        throw new PortalInputError("Enter a valid linking request and membership key.");
       }
-      const csrfToken = cookie(req, "aa_oauth_csrf");
+      if (retentionValue !== "persistent" && retentionValue !== "session") {
+        throw new PortalInputError("Choose a valid connection retention option.");
+      }
+      if (!trustsDestination) {
+        throw new PortalInputError("Confirm that you recognize and trust the callback destination.");
+      }
+      const cookieName = oauthCsrfCookieName(requestToken);
+      const csrfToken = cookie(req, cookieName);
       const completed = await provider.completeLink(
         requestToken,
         csrfToken,
         membershipKey,
-        retention,
+        retentionValue,
       );
-      res.clearCookie("aa_oauth_csrf", {
+      res.clearCookie(cookieName, {
         httpOnly: true,
         secure: req.secure,
         sameSite: "lax",
@@ -197,10 +229,11 @@ export function oauthPortalRouter(provider: PostgresOAuthProvider): Router {
       const link = TOKEN_PATTERN.test(requestToken)
         ? await provider.getLinkRequest(requestToken).catch(() => undefined)
         : undefined;
-      if (link && (error instanceof OAuthError || error instanceof Error)) {
+      if (link && (error instanceof OAuthError || error instanceof PortalInputError)) {
         res.status(400).type("html").send(linkPage(
           link.requestToken,
           link.clientName,
+          link.redirectUri,
           error.message,
         ));
         return;

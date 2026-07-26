@@ -2,7 +2,7 @@ import { createServer } from "./server.js";
 import { search, getByMd5, getStats, pool } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
-import { keyValidationError, validateKey } from "./auth.js";
+import { keyValidationError, validateKeyLive } from "./auth.js";
 import { isMd5 } from "./identifiers.js";
 import { parseReadQuery, parseSearchQuery } from "./httpInput.js";
 import { boundedInteger } from "./config.js";
@@ -11,6 +11,7 @@ import { oauthConfigFromEnv } from "./oauthConfig.js";
 import { KeyProtector } from "./oauthCrypto.js";
 import { PostgresOAuthProvider, oauthScope } from "./oauthProvider.js";
 import { oauthPortalRouter } from "./oauthPortal.js";
+import { publicClientOAuthMetadata } from "./oauthMetadata.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -33,7 +34,7 @@ if (transport === "stdio") {
       protector: new KeyProtector(oauthConfig.encryptionKey),
       issuerUrl: oauthConfig.issuerUrl,
       resourceUrl: oauthConfig.resourceUrl,
-      validateKey,
+      validateKey: validateKeyLive,
     })
     : undefined;
   const resourceMetadataUrl = oauthConfig
@@ -123,14 +124,25 @@ if (transport === "stdio") {
     next();
   });
   if (oauthProvider && oauthConfig) {
-    app.use(mcpAuthRouter({
+    const authRouterOptions = {
       provider: oauthProvider,
       issuerUrl: oauthConfig.issuerUrl,
       resourceServerUrl: oauthConfig.resourceUrl,
       serviceDocumentationUrl: new URL("/oauth", oauthConfig.issuerUrl),
       scopesSupported: [oauthScope],
       resourceName: "Anna's Archive MCP",
-    }));
+    };
+    const publicMetadata = publicClientOAuthMetadata(authRouterOptions);
+    app.options("/.well-known/oauth-authorization-server", (_req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+      res.status(204).end();
+    });
+    app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.json(publicMetadata);
+    });
+    app.use(mcpAuthRouter(authRouterOptions));
     app.use("/oauth", oauthPortalRouter(oauthProvider));
     void oauthProvider.cleanupExpired().catch((error) => {
       console.error(`OAuth cleanup failed during startup: ${error}`);
@@ -216,8 +228,11 @@ if (transport === "stdio") {
     if (databaseHealth && now < databaseHealth.expiresAt) return databaseHealth.ok;
     if (pendingDatabaseHealth) return pendingDatabaseHealth;
 
-    const check = pool.query("SELECT 1")
-      .then(() => true)
+    const healthQuery = oauthProvider
+      ? "SELECT to_regclass('public.oauth_clients') IS NOT NULL AS oauth_schema_ready"
+      : "SELECT true AS oauth_schema_ready";
+    const check = pool.query(healthQuery)
+      .then((result) => result.rows[0]?.oauth_schema_ready === true)
       .catch(() => false)
       .then((ok) => {
         databaseHealth = {
@@ -286,6 +301,9 @@ if (transport === "stdio") {
       const secretKey = await resolved.credential.getPlaintextKey();
       const result = await getDownloadUrl(req.params.md5, secretKey);
       if (result.error) {
+        if (/invalid secret key/i.test(result.error)) {
+          await resolved.credential.invalidate();
+        }
         res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
         return;
       }
@@ -319,6 +337,9 @@ if (transport === "stdio") {
 
       const result = await readDocument(req.params.md5, ext, secretKey, parsed.value);
       if (result.error) {
+        if (/invalid secret key/i.test(result.error)) {
+          await resolved.credential.invalidate();
+        }
         res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
         return;
       }

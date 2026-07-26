@@ -99,6 +99,18 @@ export async function validateKey(key: string): Promise<ValidationResult> {
   return validation;
 }
 
+export async function validateKeyLive(key: string): Promise<ValidationResult> {
+  if (!key) return { ok: false, reason: "missing" };
+  const identifier = cache.identifier(key);
+  const pending = pendingValidations.get(identifier);
+  if (pending) return pending;
+  const validation = validateUncached(key).finally(() => {
+    pendingValidations.delete(identifier);
+  });
+  pendingValidations.set(identifier, validation);
+  return validation;
+}
+
 export function invalidateKey(key: string): void {
   cache.delete(key);
 }

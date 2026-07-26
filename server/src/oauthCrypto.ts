@@ -91,8 +91,12 @@ export class KeyProtector {
     ]).toString("utf8");
   }
 
-  fingerprint(secret: string): string {
+  fingerprint(secret: string, clientId = ""): string {
     return createHmac("sha256", this.fingerprintKey)
+      .update(Buffer.from(clientId).length.toString(10))
+      .update(":")
+      .update(clientId)
+      .update(":")
       .update(secret)
       .digest("base64url");
   }
@@ -111,4 +115,3 @@ export function safeTokenEqual(left: string, right: string): boolean {
   const rightHash = Buffer.from(tokenHash(right), "base64url");
   return timingSafeEqual(leftHash, rightHash);
 }
-

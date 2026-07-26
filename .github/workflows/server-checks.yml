@@ -86,6 +86,20 @@ jobs:
             --file /oauth-schema.sql
           docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
             psql --host 127.0.0.1 --username annas --dbname annas \
+            --command "DO \$\$ BEGIN
+              IF to_regclass('public.oauth_clients') IS NULL
+                 OR to_regclass('public.oauth_authorization_requests') IS NULL
+                 OR to_regclass('public.oauth_connections') IS NULL
+                 OR to_regclass('public.oauth_authorization_codes') IS NULL
+                 OR to_regclass('public.oauth_access_tokens') IS NULL
+                 OR to_regclass('public.oauth_refresh_tokens') IS NULL
+                 OR to_regclass('public.idx_oauth_connections_client_key') IS NULL
+              THEN
+                RAISE EXCEPTION 'OAuth schema is incomplete';
+              END IF;
+            END \$\$;"
+          docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
+            psql --host 127.0.0.1 --username annas --dbname annas \
             --file /oauth-schema.sql
       - name: Test OAuth flow against Postgres
         working-directory: server

@@ -11,6 +11,7 @@ const integrationTest = databaseUrl ? test : test.skip;
 const pool = databaseUrl
   ? new pg.Pool({ connectionString: databaseUrl, max: 2 })
   : undefined;
+const testMasterKey = randomBytes(32).toString("base64");
 
 interface Flow {
   provider: PostgresOAuthProvider;
@@ -28,7 +29,7 @@ async function linkedFlow(retention: "persistent" | "session"): Promise<Flow> {
   if (!pool) throw new Error("Integration database is not configured.");
   const provider = new PostgresOAuthProvider({
     pool,
-    protector: new KeyProtector(randomBytes(32).toString("base64")),
+    protector: new KeyProtector(testMasterKey),
     issuerUrl: new URL("https://mcp.example.test"),
     resourceUrl: new URL("https://mcp.example.test/mcp"),
     validateKey: async (key) => key === "membership-secret"
@@ -48,10 +49,12 @@ async function linkedFlow(retention: "persistent" | "session"): Promise<Flow> {
   } as never);
   const codeVerifier = opaqueToken(48);
   let csrfToken = "";
+  let csrfCookieName = "";
   let portalRedirect = "";
   const response = {
     cookie(name: string, value: string) {
-      assert.equal(name, "aa_oauth_csrf");
+      assert.match(name, /^aa_oauth_csrf_[A-Za-z0-9_-]{16}$/);
+      csrfCookieName = name;
       csrfToken = value;
       return this;
     },
@@ -70,6 +73,7 @@ async function linkedFlow(retention: "persistent" | "session"): Promise<Flow> {
   const requestToken = new URL(portalRedirect).searchParams.get("request");
   assert.ok(requestToken);
   assert.ok(csrfToken);
+  assert.ok(csrfCookieName);
   const membershipKey = "membership-secret";
   const linked = await provider.completeLink(
     requestToken,
@@ -113,16 +117,24 @@ describe("PostgresOAuthProvider", () => {
     assert.ok(!JSON.stringify(tokens).includes(flow.membershipKey));
 
     const stored = await pool.query(
-      `SELECT id, key_ciphertext, key_iv, key_tag, key_fingerprint
+      `SELECT id, key_ciphertext, key_iv, key_tag, key_fingerprint, expires_at
        FROM oauth_connections`,
     );
     assert.equal(stored.rowCount, 1);
+    assert.equal(stored.rows[0].expires_at, null);
     assert.ok(!JSON.stringify(stored.rows).includes(flow.membershipKey));
     const auth = await flow.provider.verifyAccessToken(tokens.access_token);
     assert.equal(auth.clientId, flow.client.client_id);
     assert.equal(
       await flow.provider.decryptConnectionKey(auth.extra?.connectionId as string),
       flow.membershipKey,
+    );
+    await pool.query(
+      "UPDATE oauth_access_tokens SET resource = 'https://wrong.example.test/mcp'",
+    );
+    await assert.rejects(
+      () => flow.provider.verifyAccessToken(tokens.access_token),
+      /invalid or expired/,
     );
 
     const rotated = await flow.provider.exchangeRefreshToken(
@@ -164,5 +176,130 @@ describe("PostgresOAuthProvider", () => {
       Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
       0,
     );
+  });
+
+  integrationTest("bounds consumed-token and unused-client retention", async () => {
+    if (!pool) return;
+    const flow = await linkedFlow("persistent");
+    const tokens = await flow.provider.exchangeAuthorizationCode(
+      flow.client,
+      flow.authorizationCode,
+      undefined,
+      flow.client.redirect_uris[0],
+    );
+    assert.ok(tokens.refresh_token);
+    await flow.provider.exchangeRefreshToken(flow.client, tokens.refresh_token);
+    await pool.query(
+      `UPDATE oauth_refresh_tokens
+       SET consumed_at = now() - interval '8 days'
+       WHERE consumed_at IS NOT NULL`,
+    );
+    await pool.query(
+      `INSERT INTO oauth_clients (client_id, metadata, created_at)
+       VALUES (
+         'unused-client',
+         '{"client_id":"unused-client","redirect_uris":["https://client.example.test/callback"],"token_endpoint_auth_method":"none"}',
+         now() - interval '31 days'
+       )`,
+    );
+
+    await flow.provider.cleanupExpired();
+
+    assert.equal(
+      Number((await pool.query(
+        "SELECT count(*) FROM oauth_refresh_tokens WHERE consumed_at IS NOT NULL",
+      )).rows[0].count),
+      0,
+    );
+    assert.equal(
+      Number((await pool.query(
+        "SELECT count(*) FROM oauth_clients WHERE client_id = 'unused-client'",
+      )).rows[0].count),
+      0,
+    );
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
+      1,
+    );
+  });
+
+  integrationTest("deletes an abandoned persistent link after its code expires", async () => {
+    if (!pool) return;
+    const abandoned = await linkedFlow("persistent");
+    const provisional = await pool.query(
+      "SELECT expires_at FROM oauth_connections",
+    );
+    assert.equal(provisional.rowCount, 1);
+    assert.ok(provisional.rows[0].expires_at instanceof Date);
+
+    await pool.query(
+      "UPDATE oauth_authorization_codes SET expires_at = now() - interval '1 second'",
+    );
+    await pool.query(
+      "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
+    );
+    await abandoned.provider.cleanupExpired();
+
+    assert.equal(
+      Number((await pool.query(
+        "SELECT count(*) FROM oauth_connections WHERE retention = 'persistent'",
+      )).rows[0].count),
+      0,
+    );
+  });
+
+  integrationTest("serializes duplicate links for the same client and key", async () => {
+    if (!pool) return;
+    await Promise.all([
+      linkedFlow("persistent"),
+      linkedFlow("persistent"),
+    ]);
+
+    assert.equal(
+      Number((await pool.query(
+        "SELECT count(*) FROM oauth_connections WHERE client_id = 'test-client'",
+      )).rows[0].count),
+      1,
+    );
+  });
+
+  integrationTest("revokes the connection during a concurrent refresh replay", async () => {
+    if (!pool) return;
+    const flow = await linkedFlow("persistent");
+    const tokens = await flow.provider.exchangeAuthorizationCode(
+      flow.client,
+      flow.authorizationCode,
+      undefined,
+      flow.client.redirect_uris[0],
+    );
+    assert.ok(tokens.refresh_token);
+
+    const outcomes = await Promise.allSettled([
+      flow.provider.exchangeRefreshToken(flow.client, tokens.refresh_token),
+      flow.provider.exchangeRefreshToken(flow.client, tokens.refresh_token),
+    ]);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
+      0,
+    );
+  });
+
+  integrationTest("rejects redirect fragments and embedded credentials", async () => {
+    const flow = await linkedFlow("session");
+    const registerClient = flow.provider.clientsStore.registerClient;
+    if (!registerClient) throw new Error("Dynamic registration is unavailable.");
+    for (const redirectUri of [
+      "https://client.example.test/callback#fragment",
+      "https://user:password@client.example.test/callback",
+    ]) {
+      await assert.rejects(async () => await registerClient({
+        client_id: opaqueToken(),
+        client_id_issued_at: Math.floor(Date.now() / 1000),
+        redirect_uris: [redirectUri],
+        token_endpoint_auth_method: "none",
+      } as never), /redirect URIs/);
+    }
   });
 });

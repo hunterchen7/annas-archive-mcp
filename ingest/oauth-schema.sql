@@ -1,3 +1,5 @@
+\set ON_ERROR_STOP on
+
 CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id           TEXT PRIMARY KEY,
     metadata            JSONB NOT NULL,
@@ -33,6 +35,9 @@ CREATE TABLE IF NOT EXISTS oauth_connections (
 CREATE INDEX IF NOT EXISTS idx_oauth_connections_expiry
     ON oauth_connections (expires_at)
     WHERE expires_at IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_connections_client_key
+    ON oauth_connections (client_id, key_fingerprint);
 
 CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
     code_hash           TEXT PRIMARY KEY,
@@ -79,3 +84,6 @@ CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_connection
 CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family
     ON oauth_refresh_tokens (family_id);
 
+CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_consumed
+    ON oauth_refresh_tokens (consumed_at)
+    WHERE consumed_at IS NOT NULL;

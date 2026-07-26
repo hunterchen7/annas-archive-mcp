@@ -33,6 +33,8 @@ const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const SESSION_TTL_MS = ACCESS_TOKEN_TTL_SECONDS * 1000;
 const REVALIDATE_AFTER_MS = 24 * 60 * 60 * 1000;
+const USED_REFRESH_TOKEN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const UNUSED_CLIENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 type Retention = "persistent" | "session";
 
@@ -93,6 +95,7 @@ interface RefreshTokenRow extends ConnectionRow {
 export interface LinkRequest {
   requestToken: string;
   clientName: string;
+  redirectUri: string;
   expiresAt: Date;
 }
 
@@ -116,6 +119,7 @@ function validRedirectUri(value: string): boolean {
   } catch {
     return false;
   }
+  if (url.hash || url.username || url.password) return false;
   if (url.protocol === "https:") return true;
   return url.protocol === "http:" &&
     (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]");
@@ -230,7 +234,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
         expiresAt,
       ],
     );
-    res.cookie("aa_oauth_csrf", csrfToken, {
+    res.cookie(oauthCsrfCookieName(requestToken), csrfToken, {
       httpOnly: true,
       secure: this.issuerUrl.protocol === "https:",
       sameSite: "lax",
@@ -244,13 +248,14 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
 
   async getLinkRequest(requestToken: string): Promise<LinkRequest | undefined> {
     const result = await this.pool.query(
-      `SELECT r.client_id, r.expires_at, c.metadata
+      `SELECT r.client_id, r.redirect_uri, r.expires_at, c.metadata
        FROM oauth_authorization_requests r
        JOIN oauth_clients c ON c.client_id = r.client_id
        WHERE r.request_hash = $1 AND r.expires_at > $2`,
       [tokenHash(requestToken), this.now()],
     );
     const row = result.rows[0] as {
+      redirect_uri: string;
       expires_at: Date;
       metadata: OAuthClientInformationFull;
     } | undefined;
@@ -258,6 +263,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
     return {
       requestToken,
       clientName: row.metadata.client_name || "your MCP client",
+      redirectUri: row.redirect_uri,
       expiresAt: row.expires_at,
     };
   }
@@ -284,11 +290,14 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
 
     const connectionId = randomUUID();
     const encrypted = this.protector.encrypt(membershipKey, connectionId);
-    const fingerprint = this.protector.fingerprint(membershipKey);
+    const fingerprint = this.protector.fingerprint(membershipKey, request.client_id);
     const authorizationCode = opaqueToken();
-    const expiresAt = retention === "session"
+    const authorizationCodeExpiresAt = new Date(
+      this.now().getTime() + AUTHORIZATION_CODE_TTL_MS,
+    );
+    const connectionExpiresAt = retention === "session"
       ? new Date(this.now().getTime() + SESSION_TTL_MS)
-      : null;
+      : authorizationCodeExpiresAt;
     const database = await this.pool.connect();
     try {
       await database.query("BEGIN");
@@ -301,6 +310,10 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       if (consumed.rowCount !== 1) {
         throw new InvalidGrantError("This linking request has already been used or expired.");
       }
+      await database.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [`${request.client_id}:${fingerprint}`],
+      );
       await database.query(
         `DELETE FROM oauth_connections
          WHERE client_id = $1 AND key_fingerprint = $2`,
@@ -320,7 +333,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
           fingerprint,
           retention,
           this.now(),
-          expiresAt,
+          connectionExpiresAt,
         ],
       );
       await database.query(
@@ -336,7 +349,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
           request.scopes,
           request.code_challenge,
           request.resource,
-          new Date(this.now().getTime() + AUTHORIZATION_CODE_TTL_MS),
+          authorizationCodeExpiresAt,
         ],
       );
       await database.query("COMMIT");
@@ -407,12 +420,19 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       if (!sameResource(code.resource, resource)) {
         throw new InvalidGrantError("resource does not match the authorization request.");
       }
+      const persistent = await this.isPersistent(database, code.connection_id);
+      if (persistent) {
+        await database.query(
+          "UPDATE oauth_connections SET expires_at = NULL WHERE id = $1",
+          [code.connection_id],
+        );
+      }
       const tokens = await this.issueTokens(database, {
         clientId: code.client_id,
         connectionId: code.connection_id,
         scopes: code.scopes,
         resource: code.resource,
-        includeRefreshToken: await this.isPersistent(database, code.connection_id),
+        includeRefreshToken: persistent,
       });
       await database.query("COMMIT");
       return tokens;
@@ -456,8 +476,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
 
     let revalidated = false;
     if (this.now().getTime() - initial.last_validated_at.getTime() >= REVALIDATE_AFTER_MS) {
-      const plaintextKey = this.protector.decrypt(envelope(initial), initial.id);
-      const validation = await this.validateMembershipKey(plaintextKey);
+      const validation = await this.revalidateConnection(initial);
       if (!validation.ok) {
         if (validation.reason === "unreachable") {
           throw new TemporarilyUnavailableError(
@@ -471,8 +490,10 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
     }
 
     const database = await this.pool.connect();
+    let transactionOpen = false;
     try {
       await database.query("BEGIN");
+      transactionOpen = true;
       const consumed = await database.query(
         `UPDATE oauth_refresh_tokens
          SET consumed_at = $3
@@ -483,7 +504,8 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       );
       if (consumed.rowCount !== 1) {
         await database.query("ROLLBACK");
-        await this.pool.query("DELETE FROM oauth_connections WHERE id = $1", [
+        transactionOpen = false;
+        await database.query("DELETE FROM oauth_connections WHERE id = $1", [
           initial.connection_id,
         ]);
         throw new InvalidGrantError("Refresh token reuse detected; the connection was revoked.");
@@ -503,12 +525,22 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
         familyId: initial.family_id,
       });
       await database.query("COMMIT");
+      transactionOpen = false;
       return tokens;
     } catch (error) {
-      await database.query("ROLLBACK");
+      if (transactionOpen) await database.query("ROLLBACK");
       throw error;
     } finally {
       database.release();
+    }
+  }
+
+  private async revalidateConnection(connection: ConnectionRow): Promise<ValidationResult> {
+    let plaintextKey = this.protector.decrypt(envelope(connection), connection.id);
+    try {
+      return await this.validateMembershipKey(plaintextKey);
+    } finally {
+      plaintextKey = "";
     }
   }
 
@@ -600,6 +632,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       !row ||
       row.revoked_at ||
       row.expires_at <= this.now() ||
+      row.resource !== this.resourceUrl.href ||
       (row.connection_expires_at && row.connection_expires_at <= this.now())
     ) {
       throw new InvalidTokenError("Access token is invalid or expired.");
@@ -623,6 +656,12 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
     const row = result.rows[0] as ConnectionRow | undefined;
     if (!row) throw new InvalidTokenError("Linked connection is invalid or expired.");
     return this.protector.decrypt(envelope(row), row.id);
+  }
+
+  async deleteConnection(connectionId: string): Promise<void> {
+    await this.pool.query("DELETE FROM oauth_connections WHERE id = $1", [
+      connectionId,
+    ]);
   }
 
   async revokeToken(
@@ -663,7 +702,25 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       "DELETE FROM oauth_connections WHERE expires_at IS NOT NULL AND expires_at <= $1",
       [now],
     );
+    await this.pool.query(
+      "DELETE FROM oauth_refresh_tokens WHERE consumed_at IS NOT NULL AND consumed_at <= $1",
+      [new Date(now.getTime() - USED_REFRESH_TOKEN_RETENTION_MS)],
+    );
+    await this.pool.query(
+      `DELETE FROM oauth_clients c
+       WHERE c.created_at <= $1
+         AND NOT EXISTS (SELECT 1 FROM oauth_connections x WHERE x.client_id = c.client_id)
+         AND NOT EXISTS (SELECT 1 FROM oauth_authorization_requests r WHERE r.client_id = c.client_id)
+         AND NOT EXISTS (SELECT 1 FROM oauth_authorization_codes a WHERE a.client_id = c.client_id)
+         AND NOT EXISTS (SELECT 1 FROM oauth_access_tokens t WHERE t.client_id = c.client_id)
+         AND NOT EXISTS (SELECT 1 FROM oauth_refresh_tokens f WHERE f.client_id = c.client_id)`,
+      [new Date(now.getTime() - UNUSED_CLIENT_RETENTION_MS)],
+    );
   }
 }
 
 export const oauthScope = SCOPE;
+
+export function oauthCsrfCookieName(requestToken: string): string {
+  return `aa_oauth_csrf_${tokenHash(requestToken).slice(0, 16)}`;
+}

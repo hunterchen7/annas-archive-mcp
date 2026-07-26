@@ -1,7 +1,7 @@
 import type { Request } from "express";
 import type { PostgresOAuthProvider } from "./oauthProvider.js";
 import type { ValidationResult } from "./auth.js";
-import { validateKey } from "./auth.js";
+import { invalidateKey, validateKey } from "./auth.js";
 import { takeSecretKey } from "./requestKey.js";
 
 const MAX_BEARER_BYTES = 2_048;
@@ -10,6 +10,7 @@ export interface MembershipCredential {
   readonly kind: "header" | "oauth";
   validateMembership(): Promise<ValidationResult>;
   getPlaintextKey(): Promise<string>;
+  invalidate(): Promise<void>;
   clear(): void;
 }
 
@@ -24,6 +25,10 @@ export class HeaderCredential implements MembershipCredential {
 
   async getPlaintextKey(): Promise<string> {
     return this.value;
+  }
+
+  async invalidate(): Promise<void> {
+    invalidateKey(this.value);
   }
 
   clear(): void {
@@ -51,6 +56,11 @@ export class OAuthCredential implements MembershipCredential {
       this.plaintextKey = await this.provider.decryptConnectionKey(this.connectionId);
     }
     return this.plaintextKey;
+  }
+
+  async invalidate(): Promise<void> {
+    await this.provider.deleteConnection(this.connectionId);
+    this.clear();
   }
 
   clear(): void {
@@ -81,7 +91,7 @@ function takeBearerToken(req: Pick<Request, "headers" | "rawHeaders">): string {
   ) {
     return "";
   }
-  const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(value);
+  const match = /^Bearer ([A-Za-z0-9_-]+)$/i.exec(value);
   return match?.[1] || "";
 }
 
@@ -91,15 +101,19 @@ export async function resolveCredential(
 ): Promise<ResolvedCredential> {
   const headerKey = takeSecretKey(req);
   const bearerToken = takeBearerToken(req);
+  if (!oauthProvider) {
+    return {
+      credential: new HeaderCredential(headerKey),
+      oauth: false,
+      present: Boolean(headerKey),
+    };
+  }
   if (headerKey && bearerToken) {
     throw Object.assign(new Error("Provide either OAuth or X-Annas-Secret-Key, not both."), {
       status: 400,
     });
   }
   if (bearerToken) {
-    if (!oauthProvider) {
-      throw Object.assign(new Error("OAuth is not enabled on this server."), { status: 401 });
-    }
     let auth;
     try {
       auth = await oauthProvider.verifyAccessToken(bearerToken);

@@ -86,7 +86,7 @@ docker compose exec -u postgres postgres \
   psql --username annas --dbname postgres \
   --file /docker-entrypoint-initdb.d/02-sync-password.sql
 docker compose exec postgres \
-  psql --username annas --dbname annas \
+  psql --set ON_ERROR_STOP=1 --username annas --dbname annas \
   --file /docker-entrypoint-initdb.d/03-oauth-schema.sql
 ```
 
@@ -119,7 +119,7 @@ Apply the OAuth schema and restart:
 ```bash
 docker compose up -d --no-deps --force-recreate --wait postgres
 docker compose exec postgres psql --username annas --dbname annas \
-  --file /docker-entrypoint-initdb.d/03-oauth-schema.sql
+  --set ON_ERROR_STOP=1 --file /docker-entrypoint-initdb.d/03-oauth-schema.sql
 docker compose up -d --build mcp-server
 ```
 
@@ -182,7 +182,12 @@ key:
 
 - **Initial link:** the key is plaintext in server process memory while the
   server sends it over HTTPS to Anna's Archive's account endpoint for
-  validation. It is encrypted only after successful validation.
+  live validation. It is encrypted only after successful validation. Until the
+  client completes the OAuth code exchange, that encrypted record is
+  provisional and expires with the five-minute authorization code.
+- **Client identity:** dynamic client names are self-supplied and unverified.
+  The portal displays the exact callback origin and requires the user to
+  confirm that destination before it accepts a key.
 - **Search:** OAuth metadata searches use the previously validated connection.
   They do not decrypt the stored key.
 - **Download and read:** the key is decrypted in process memory for the active
@@ -198,8 +203,13 @@ key:
   process memory.
 - **Deletion:** OAuth revocation/disconnect deletes the encrypted key.
   Persistent connections otherwise have no automatic expiry. Session
-  connections are deleted after expiry by hourly cleanup (which also runs at
-  server startup).
+  access expires after one hour; its database row is deleted by hourly cleanup
+  (which also runs at startup), normally within the following hour.
+- **Deletion limits:** active database rows are deleted, but encrypted
+  ciphertext can remain in PostgreSQL WAL, replicas, snapshots, and backups
+  until the operator's retention windows expire. A global master key can still
+  decrypt those retained copies, so operators must set and disclose backup
+  retention accordingly.
 - **Legacy header:** the plaintext key is request-scoped and is not written to
   PostgreSQL. Only a short-lived process-local HMAC validation verdict is
   cached.

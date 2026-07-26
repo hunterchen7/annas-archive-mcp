@@ -149,6 +149,9 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
       const result = await getDownloadUrl(md5, secretKey);
 
       if (result.error) {
+        if (/invalid secret key/i.test(result.error)) {
+          await credential.invalidate();
+        }
         return { content: [{ type: "text", text: `Download failed: ${result.error}` }], isError: true };
       }
 
@@ -216,7 +219,6 @@ TYPICAL WORKFLOW:
       if (authError) {
         return { content: [{ type: "text", text: authError.message }], isError: true };
       }
-      const secretKey = await credential.getPlaintextKey();
       if (end_page !== undefined && start_page === undefined) {
         return { content: [{ type: "text", text: "end_page requires start_page." }], isError: true };
       }
@@ -234,6 +236,7 @@ TYPICAL WORKFLOW:
           return { content: [{ type: "text", text: "A read request can include at most 100 pages." }], isError: true };
         }
       }
+      const secretKey = await credential.getPlaintextKey();
       const doc = await getByMd5(md5);
       const ext = doc?.extension || "pdf";
 
@@ -251,6 +254,9 @@ TYPICAL WORKFLOW:
       const result = await readDocument(md5, ext, secretKey, opts);
 
       if (result.error) {
+        if (/invalid secret key/i.test(result.error)) {
+          await credential.invalidate();
+        }
         return { content: [{ type: "text", text: `Read failed: ${result.error}` }], isError: true };
       }
 

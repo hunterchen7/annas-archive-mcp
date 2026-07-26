@@ -38,9 +38,22 @@ describe("KeyProtector", () => {
     const second = new KeyProtector(masterKey);
     const other = new KeyProtector(randomBytes(32).toString("base64"));
 
-    assert.equal(first.fingerprint("membership-secret"), second.fingerprint("membership-secret"));
-    assert.notEqual(first.fingerprint("membership-secret"), other.fingerprint("membership-secret"));
-    assert.notEqual(first.fingerprint("membership-secret"), tokenHash("membership-secret"));
+    assert.equal(
+      first.fingerprint("membership-secret", "client-a"),
+      second.fingerprint("membership-secret", "client-a"),
+    );
+    assert.notEqual(
+      first.fingerprint("membership-secret", "client-a"),
+      first.fingerprint("membership-secret", "client-b"),
+    );
+    assert.notEqual(
+      first.fingerprint("membership-secret", "client-a"),
+      other.fingerprint("membership-secret", "client-a"),
+    );
+    assert.notEqual(
+      first.fingerprint("membership-secret", "client-a"),
+      tokenHash("membership-secret"),
+    );
   });
 
   test("rejects missing, malformed, and incorrectly sized master keys", () => {
@@ -58,4 +71,3 @@ describe("OAuth tokens", () => {
     assert.equal(safeTokenEqual(token, opaqueToken()), false);
   });
 });
-
