@@ -1,5 +1,8 @@
 import express, { type Request, type Response, type Router } from "express";
-import { OAuthError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import {
+  InvalidGrantError,
+  TemporarilyUnavailableError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import {
   oauthCsrfCookieName,
   type LinkRequest,
@@ -211,7 +214,11 @@ export function portalErrorPage(
   validRequestToken: boolean,
   link?: LinkRequest,
 ): string | undefined {
-  if (!(error instanceof OAuthError || error instanceof PortalInputError)) {
+  if (!(
+    error instanceof InvalidGrantError ||
+    error instanceof TemporarilyUnavailableError ||
+    error instanceof PortalInputError
+  )) {
     return undefined;
   }
   if (link) {
@@ -223,6 +230,28 @@ export function portalErrorPage(
     );
   }
   return unusableLinkPage(validRequestToken);
+}
+
+export async function resolvePortalErrorPage(
+  provider: Pick<PostgresOAuthProvider, "getLinkRequest">,
+  error: unknown,
+  requestToken: string,
+): Promise<{ page: string; link?: LinkRequest } | undefined> {
+  const validRequestToken = TOKEN_PATTERN.test(requestToken);
+  if (!(
+    error instanceof InvalidGrantError ||
+    error instanceof TemporarilyUnavailableError ||
+    error instanceof PortalInputError
+  )) {
+    return undefined;
+  }
+  const link = validRequestToken
+    ? await provider.getLinkRequest(requestToken)
+    : undefined;
+  return {
+    page: portalErrorPage(error, validRequestToken, link)!,
+    link,
+  };
 }
 
 function portalHeaders(_req: Request, res: Response, next: () => void): void {
@@ -299,14 +328,18 @@ export function oauthPortalRouter(provider: PostgresOAuthProvider): Router {
       clearOauthCsrfCookie(req, res, requestToken);
       res.status(200).type("html").send(callbackPage(completed.redirectUrl));
     } catch (error) {
-      const validRequestToken = TOKEN_PATTERN.test(requestToken);
-      const link = validRequestToken
-        ? await provider.getLinkRequest(requestToken).catch(() => undefined)
-        : undefined;
-      const errorPage = portalErrorPage(error, validRequestToken, link);
-      if (errorPage) {
-        if (!link) clearOauthCsrfCookie(req, res, requestToken);
-        res.status(400).type("html").send(errorPage);
+      let errorResolution: Awaited<ReturnType<typeof resolvePortalErrorPage>>;
+      try {
+        errorResolution = await resolvePortalErrorPage(provider, error, requestToken);
+      } catch (lookupError) {
+        next(lookupError);
+        return;
+      }
+      if (errorResolution) {
+        if (!errorResolution.link) {
+          clearOauthCsrfCookie(req, res, requestToken);
+        }
+        res.status(400).type("html").send(errorResolution.page);
         return;
       }
       next(error);
