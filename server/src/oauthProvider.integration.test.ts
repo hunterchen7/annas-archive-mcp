@@ -222,11 +222,14 @@ describe("PostgresOAuthProvider", () => {
       assert.ok(expiresIn <= 30 * 60);
 
       await pool.query(
-        "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
+        "UPDATE oauth_connections SET expires_at = now() + interval '500 milliseconds'",
       );
       await assert.rejects(
         () => flow.provider.exchangeRefreshToken(flow.client, rotated.refresh_token!),
         /expired/,
+      );
+      await pool.query(
+        "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
       );
       await flow.provider.cleanupExpired();
       assert.equal(

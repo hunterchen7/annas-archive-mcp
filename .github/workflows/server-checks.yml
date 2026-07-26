@@ -78,6 +78,29 @@ jobs:
           docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
             psql --host 127.0.0.1 --username annas --dbname postgres \
             --command "SELECT 1"
+      - name: Seed previous OAuth schema
+        working-directory: .
+        run: |
+          docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
+            psql --host 127.0.0.1 --username annas --dbname annas \
+            --command "
+              CREATE TABLE oauth_clients (
+                client_id TEXT PRIMARY KEY,
+                metadata JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+              );
+              CREATE TABLE oauth_connections (
+                id UUID PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+                key_ciphertext TEXT NOT NULL,
+                key_iv TEXT NOT NULL,
+                key_tag TEXT NOT NULL,
+                key_fingerprint TEXT NOT NULL,
+                retention TEXT NOT NULL CHECK (retention IN ('persistent', 'session')),
+                last_validated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                expires_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+              );"
       - name: Test OAuth schema is repeatable
         working-directory: .
         run: |
@@ -94,6 +117,10 @@ jobs:
                  OR to_regclass('public.oauth_access_tokens') IS NULL
                  OR to_regclass('public.oauth_refresh_tokens') IS NULL
                  OR to_regclass('public.idx_oauth_connections_client_key') IS NULL
+                 OR NOT EXISTS (
+                   SELECT 1 FROM oauth_schema_metadata
+                   WHERE singleton = TRUE AND version >= 2
+                 )
               THEN
                 RAISE EXCEPTION 'OAuth schema is incomplete';
               END IF;

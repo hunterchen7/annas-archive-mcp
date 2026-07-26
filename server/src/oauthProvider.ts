@@ -600,10 +600,12 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
         options.connectionExpiresAt < normalExpiresAt
       ? options.connectionExpiresAt
       : normalExpiresAt;
-    const expiresIn = Math.max(
-      1,
-      Math.floor((expiresAt.getTime() - issuedAt.getTime()) / 1000),
+    const expiresIn = Math.floor(
+      (expiresAt.getTime() - issuedAt.getTime()) / 1000,
     );
+    if (expiresIn < 1) {
+      throw new InvalidGrantError("Linked connection is expired.");
+    }
     await database.query(
       `INSERT INTO oauth_access_tokens
        (token_hash, client_id, connection_id, scopes, resource, expires_at)

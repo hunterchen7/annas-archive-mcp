@@ -40,6 +40,16 @@ ALTER TABLE oauth_connections
     ADD CONSTRAINT oauth_connections_retention_check
     CHECK (retention IN ('persistent', 'days_30', 'days_14', 'days_7', 'session'));
 
+CREATE TABLE IF NOT EXISTS oauth_schema_metadata (
+    singleton           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    version             INTEGER NOT NULL
+);
+
+INSERT INTO oauth_schema_metadata (singleton, version)
+VALUES (TRUE, 2)
+ON CONFLICT (singleton) DO UPDATE
+SET version = EXCLUDED.version;
+
 CREATE INDEX IF NOT EXISTS idx_oauth_connections_expiry
     ON oauth_connections (expires_at)
     WHERE expires_at IS NOT NULL;

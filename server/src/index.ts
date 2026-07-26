@@ -237,6 +237,11 @@ if (transport === "stdio") {
            AND to_regclass('public.oauth_access_tokens') IS NOT NULL
            AND to_regclass('public.oauth_refresh_tokens') IS NOT NULL
            AND to_regclass('public.idx_oauth_connections_client_key') IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+             FROM oauth_schema_metadata
+             WHERE singleton = TRUE AND version >= 2
+           )
            AS oauth_schema_ready`
       : "SELECT true AS oauth_schema_ready";
     const check = pool.query(healthQuery)
