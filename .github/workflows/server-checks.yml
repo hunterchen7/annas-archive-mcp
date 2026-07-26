@@ -51,6 +51,7 @@ jobs:
         working-directory: .
         run: |
           docker run -d --name aa-password-migration \
+            -p 127.0.0.1:55432:5432 \
             -e POSTGRES_DB=annas \
             -e POSTGRES_USER=annas \
             -e POSTGRES_PASSWORD=old-ci-password \
@@ -86,6 +87,11 @@ jobs:
           docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
             psql --host 127.0.0.1 --username annas --dbname annas \
             --file /oauth-schema.sql
+      - name: Test OAuth flow against Postgres
+        working-directory: server
+        env:
+          OAUTH_INTEGRATION_DATABASE_URL: postgresql://annas:new-ci-password@127.0.0.1:55432/annas
+        run: bun test src/oauthProvider.integration.test.ts
       - name: Clean up migration test
         if: always()
         working-directory: .
