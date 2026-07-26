@@ -200,8 +200,8 @@ describe("PostgresOAuthProvider", () => {
 
       const stored: pg.QueryResult<{ retention: string; expires_at: Date }> =
         await pool.query(
-        "SELECT retention, expires_at FROM oauth_connections",
-      );
+          "SELECT retention, expires_at FROM oauth_connections",
+        );
       assert.equal(stored.rows[0].retention, retention);
       const expiresAt = stored.rows[0].expires_at;
       const expectedTtl = expectedDays * 24 * 60 * 60 * 1000;
@@ -209,10 +209,23 @@ describe("PostgresOAuthProvider", () => {
       assert.ok(expiresAt.getTime() <= activatedAfter + expectedTtl);
 
       await pool.query(
+        "UPDATE oauth_connections SET expires_at = now() + interval '30 minutes'",
+      );
+      const rotated = await flow.provider.exchangeRefreshToken(
+        flow.client,
+        tokens.refresh_token,
+      );
+      assert.ok(rotated.refresh_token);
+      const expiresIn = rotated.expires_in;
+      assert.ok(expiresIn);
+      assert.ok(expiresIn > 0);
+      assert.ok(expiresIn <= 30 * 60);
+
+      await pool.query(
         "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
       );
       await assert.rejects(
-        () => flow.provider.exchangeRefreshToken(flow.client, tokens.refresh_token!),
+        () => flow.provider.exchangeRefreshToken(flow.client, rotated.refresh_token!),
         /expired/,
       );
       await flow.provider.cleanupExpired();

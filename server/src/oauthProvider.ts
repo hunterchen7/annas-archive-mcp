@@ -460,7 +460,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       await this.pool.query("DELETE FROM oauth_connections WHERE id = $1", [
         initial.connection_id,
       ]);
-      throw new InvalidGrantError("The linked session has expired.");
+      throw new InvalidGrantError("The linked connection has expired.");
     }
     const scopes = requestedScopes?.length ? scopesOrDefault(requestedScopes) : initial.scopes;
     if (scopes.some((scope) => !initial.scopes.includes(scope))) {
