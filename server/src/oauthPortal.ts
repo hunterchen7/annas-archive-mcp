@@ -122,7 +122,7 @@ ${disclosures()}
 <section class="card">
   <h2>Retention and deletion</h2>
   <p><strong>Until I disconnect</strong> has no automatic expiry. The encrypted key remains until the client calls OAuth revocation, the same key is relinked for that client, or an operator deletes the connection.</p>
-  <p><strong>One-hour session</strong> creates no refresh token. Its encrypted key is deleted after expiry by periodic cleanup, or lazily when an expired connection is next encountered.</p>
+  <p><strong>One-hour session</strong> creates no refresh token. Its encrypted key is deleted after expiry by the hourly cleanup task (and cleanup also runs on server startup).</p>
   <p>Legacy <code>X-Annas-Secret-Key</code> requests are not persisted: their key remains request-scoped, apart from a short-lived process-local keyed validation verdict.</p>
 </section>`, "Membership-key handling");
 }
@@ -211,4 +211,3 @@ export function oauthPortalRouter(provider: PostgresOAuthProvider): Router {
 
   return router;
 }
-

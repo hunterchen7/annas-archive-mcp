@@ -155,6 +155,14 @@ describe("PostgresOAuthProvider", () => {
     );
     assert.equal(tokens.refresh_token, undefined);
     await flow.provider.verifyAccessToken(tokens.access_token);
+    if (!pool) return;
+    await pool.query(
+      "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
+    );
+    await flow.provider.cleanupExpired();
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
+      0,
+    );
   });
 });
-

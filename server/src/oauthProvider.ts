@@ -648,10 +648,19 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
   async cleanupExpired(): Promise<void> {
     const now = this.now();
     await this.pool.query(
-      `DELETE FROM oauth_authorization_requests WHERE expires_at <= $1;
-       DELETE FROM oauth_authorization_codes WHERE expires_at <= $1;
-       DELETE FROM oauth_access_tokens WHERE expires_at <= $1;
-       DELETE FROM oauth_connections WHERE expires_at IS NOT NULL AND expires_at <= $1`,
+      "DELETE FROM oauth_authorization_requests WHERE expires_at <= $1",
+      [now],
+    );
+    await this.pool.query(
+      "DELETE FROM oauth_authorization_codes WHERE expires_at <= $1",
+      [now],
+    );
+    await this.pool.query(
+      "DELETE FROM oauth_access_tokens WHERE expires_at <= $1",
+      [now],
+    );
+    await this.pool.query(
+      "DELETE FROM oauth_connections WHERE expires_at IS NOT NULL AND expires_at <= $1",
       [now],
     );
   }
