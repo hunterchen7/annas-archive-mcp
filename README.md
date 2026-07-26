@@ -123,6 +123,13 @@ docker compose exec postgres psql --username annas --dbname annas \
 docker compose up -d --build mcp-server
 ```
 
+For a deployment with more than one application instance, drain and stop every
+old instance before applying this migration, then start only the updated
+version. Do not perform a mixed-version rolling deployment: an old instance
+does not understand the fixed-day retention values written by the new portal.
+The included Compose deployment runs a single application instance and is
+updated with a stop-and-replace deployment.
+
 Register this connector URL:
 
 ```text

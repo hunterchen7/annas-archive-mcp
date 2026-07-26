@@ -127,7 +127,35 @@ jobs:
             END \$\$;"
           docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
             psql --host 127.0.0.1 --username annas --dbname annas \
+            --command "
+              ALTER TABLE oauth_connections
+                DROP CONSTRAINT oauth_connections_retention_check;
+              ALTER TABLE oauth_connections
+                ADD CONSTRAINT oauth_connections_retention_check
+                CHECK (retention IN (
+                  'persistent', 'days_60', 'days_30', 'days_14', 'days_7', 'session'
+                ));
+              UPDATE oauth_schema_metadata SET version = 3 WHERE singleton = TRUE;"
+          docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
+            psql --host 127.0.0.1 --username annas --dbname annas \
             --file /oauth-schema.sql
+          docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
+            psql --host 127.0.0.1 --username annas --dbname annas \
+            --command "DO \$\$ BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM oauth_schema_metadata
+                WHERE singleton = TRUE AND version = 3
+              )
+                 OR NOT EXISTS (
+                   SELECT 1
+                   FROM pg_constraint
+                   WHERE conname = 'oauth_connections_retention_check'
+                     AND position('days_60' IN pg_get_constraintdef(oid)) > 0
+                 )
+              THEN
+                RAISE EXCEPTION 'OAuth migration downgraded a newer schema';
+              END IF;
+            END \$\$;"
       - name: Test OAuth flow against Postgres
         working-directory: server
         env:

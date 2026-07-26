@@ -26,7 +26,10 @@ function pkceChallenge(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url");
 }
 
-async function linkedFlow(retention: Retention): Promise<Flow> {
+async function linkedFlow(
+  retention: Retention,
+  now?: () => Date,
+): Promise<Flow> {
   if (!pool) throw new Error("Integration database is not configured.");
   const provider = new PostgresOAuthProvider({
     pool,
@@ -36,6 +39,7 @@ async function linkedFlow(retention: Retention): Promise<Flow> {
     validateKey: async (key) => key === "membership-secret"
       ? { ok: true }
       : { ok: false, reason: "invalid" },
+    now,
   });
   const registerClient = provider.clientsStore.registerClient;
   if (!registerClient) throw new Error("Dynamic registration is unavailable.");
@@ -222,14 +226,11 @@ describe("PostgresOAuthProvider", () => {
       assert.ok(expiresIn <= 30 * 60);
 
       await pool.query(
-        "UPDATE oauth_connections SET expires_at = now() + interval '500 milliseconds'",
+        "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
       );
       await assert.rejects(
         () => flow.provider.exchangeRefreshToken(flow.client, rotated.refresh_token!),
         /expired/,
-      );
-      await pool.query(
-        "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
       );
       await flow.provider.cleanupExpired();
       assert.equal(
@@ -237,6 +238,49 @@ describe("PostgresOAuthProvider", () => {
         0,
       );
     }
+  });
+
+  integrationTest("rolls back refresh when less than one second remains", async () => {
+    if (!pool) return;
+    let currentTime = new Date("2026-07-26T18:00:00.000Z");
+    const flow = await linkedFlow("days_7", () => currentTime);
+    const tokens = await flow.provider.exchangeAuthorizationCode(
+      flow.client,
+      flow.authorizationCode,
+      undefined,
+      flow.client.redirect_uris[0],
+    );
+    assert.ok(tokens.refresh_token);
+    await pool.query(
+      "UPDATE oauth_connections SET expires_at = $1",
+      [new Date(currentTime.getTime() + 500)],
+    );
+
+    await assert.rejects(
+      () => flow.provider.exchangeRefreshToken(flow.client, tokens.refresh_token!),
+      /expired/,
+    );
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
+      1,
+    );
+    assert.equal(
+      Number((await pool.query(
+        "SELECT count(*) FROM oauth_refresh_tokens WHERE consumed_at IS NULL",
+      )).rows[0].count),
+      1,
+    );
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_access_tokens")).rows[0].count),
+      1,
+    );
+
+    currentTime = new Date(currentTime.getTime() + 1_000);
+    await flow.provider.cleanupExpired();
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
+      0,
+    );
   });
 
   integrationTest("bounds consumed-token and unused-client retention", async () => {
