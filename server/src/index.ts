@@ -1,14 +1,19 @@
-import { createServer, type SecretLease } from "./server.js";
+import { createServer } from "./server.js";
 import { search, getByMd5, getStats, pool } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
 import { keyValidationError, validateKey } from "./auth.js";
-import { takeSecretKey } from "./requestKey.js";
 import { isMd5 } from "./identifiers.js";
 import { parseReadQuery, parseSearchQuery } from "./httpInput.js";
 import { boundedInteger } from "./config.js";
+import { resolveCredential } from "./credential.js";
+import { oauthConfigFromEnv } from "./oauthConfig.js";
+import { KeyProtector } from "./oauthCrypto.js";
+import { PostgresOAuthProvider, oauthScope } from "./oauthProvider.js";
+import { oauthPortalRouter } from "./oauthPortal.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import express from "express";
 import type { Request, Response, NextFunction, RequestHandler } from "express";
 
@@ -21,6 +26,19 @@ if (transport === "stdio") {
   console.error("MCP server running on stdio");
 } else {
   const app = express();
+  const oauthConfig = oauthConfigFromEnv();
+  const oauthProvider = oauthConfig
+    ? new PostgresOAuthProvider({
+      pool,
+      protector: new KeyProtector(oauthConfig.encryptionKey),
+      issuerUrl: oauthConfig.issuerUrl,
+      resourceUrl: oauthConfig.resourceUrl,
+      validateKey,
+    })
+    : undefined;
+  const resourceMetadataUrl = oauthConfig
+    ? new URL("/.well-known/oauth-protected-resource/mcp", oauthConfig.issuerUrl).href
+    : undefined;
   app.disable("x-powered-by");
   app.disable("etag");
   app.set(
@@ -94,6 +112,7 @@ if (transport === "stdio") {
   app.use("/mcp", rateLimit);
   app.use("/api", rateLimit);
   app.use("/health", rateLimit);
+  app.use("/oauth", rateLimit);
   app.use((req, res, next) => {
     if (Object.keys(req.query).some((key) => key.toLowerCase() === "aa_key")) {
       res.status(400).json({
@@ -103,6 +122,26 @@ if (transport === "stdio") {
     }
     next();
   });
+  if (oauthProvider && oauthConfig) {
+    app.use(mcpAuthRouter({
+      provider: oauthProvider,
+      issuerUrl: oauthConfig.issuerUrl,
+      resourceServerUrl: oauthConfig.resourceUrl,
+      serviceDocumentationUrl: new URL("/oauth", oauthConfig.issuerUrl),
+      scopesSupported: [oauthScope],
+      resourceName: "Anna's Archive MCP",
+    }));
+    app.use("/oauth", oauthPortalRouter(oauthProvider));
+    void oauthProvider.cleanupExpired().catch((error) => {
+      console.error(`OAuth cleanup failed during startup: ${error}`);
+    });
+    const oauthCleanupTimer = setInterval(() => {
+      void oauthProvider.cleanupExpired().catch((error) => {
+        console.error(`OAuth cleanup failed: ${error}`);
+      });
+    }, 60 * 60 * 1000);
+    oauthCleanupTimer.unref();
+  }
   app.use("/mcp", express.json({ limit: "1mb", strict: true }));
   app.use("/mcp", (_req, res, next) => {
     const setHeader = res.setHeader;
@@ -122,8 +161,15 @@ if (transport === "stdio") {
       res.status(400).json({ error: "MCP JSON-RPC batches are not accepted." });
       return;
     }
-    const secretLease: SecretLease = { value: takeSecretKey(req) };
-    const server = createServer(secretLease);
+    const resolved = await resolveCredential(req, oauthProvider);
+    if (oauthProvider && !resolved.present) {
+      if (resourceMetadataUrl) {
+        res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl}"`);
+      }
+      res.status(401).json({ error: "Authentication is required." });
+      return;
+    }
+    const server = createServer(resolved.credential);
     const httpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -131,7 +177,7 @@ if (transport === "stdio") {
     const closeRequestResources = () => {
       if (closed) return;
       closed = true;
-      secretLease.value = "";
+      resolved.credential.clear();
       void httpTransport.close().catch(() => {});
       void server.close().catch(() => {});
     };
@@ -146,9 +192,21 @@ if (transport === "stdio") {
   }));
 
   // GET /mcp — required for client discovery/verification
-  app.get("/mcp", (_req, res) => {
-    res.json({ name: "annas-archive", version: "1.0.0", status: "ok" });
-  });
+  app.get("/mcp", asyncRoute(async (req, res) => {
+    const resolved = await resolveCredential(req, oauthProvider);
+    try {
+      if (oauthProvider && !resolved.present) {
+        if (resourceMetadataUrl) {
+          res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl}"`);
+        }
+        res.status(401).json({ error: "Authentication is required." });
+        return;
+      }
+      res.json({ name: "annas-archive", version: "1.0.0", status: "ok" });
+    } finally {
+      resolved.credential.clear();
+    }
+  }));
 
   // Health check
   let databaseHealth: { ok: boolean; expiresAt: number } | undefined;
@@ -188,23 +246,28 @@ if (transport === "stdio") {
 
   // GET /api/search
   app.get("/api/search", asyncRoute(async (req, res) => {
-    const authError = keyValidationError(await validateKey(takeSecretKey(req)));
-    if (authError) {
-      res.status(authError.status).json({ error: authError.message });
-      return;
+    const resolved = await resolveCredential(req, oauthProvider);
+    try {
+      const authError = keyValidationError(await resolved.credential.validateMembership());
+      if (authError) {
+        res.status(authError.status).json({ error: authError.message });
+        return;
+      }
+      const parsed = parseSearchQuery(req.query);
+      if (!parsed.ok) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      const input = parsed.value;
+      if (!input.query && !input.title && !input.author && !input.isbn && !input.doi) {
+        res.status(400).json({ error: "Provide at least one of: query, title, author, isbn, doi" });
+        return;
+      }
+      const results = await search(input);
+      res.json({ count: results.length, results });
+    } finally {
+      resolved.credential.clear();
     }
-    const parsed = parseSearchQuery(req.query);
-    if (!parsed.ok) {
-      res.status(400).json({ error: parsed.error });
-      return;
-    }
-    const input = parsed.value;
-    if (!input.query && !input.title && !input.author && !input.isbn && !input.doi) {
-      res.status(400).json({ error: "Provide at least one of: query, title, author, isbn, doi" });
-      return;
-    }
-    const results = await search(input);
-    res.json({ count: results.length, results });
   }));
 
   // GET /api/download/:md5
@@ -213,18 +276,23 @@ if (transport === "stdio") {
       res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
       return;
     }
-    const secretKey = takeSecretKey(req);
-    const authError = keyValidationError(await validateKey(secretKey));
-    if (authError) {
-      res.status(authError.status).json({ error: authError.message });
-      return;
+    const resolved = await resolveCredential(req, oauthProvider);
+    try {
+      const authError = keyValidationError(await resolved.credential.validateMembership());
+      if (authError) {
+        res.status(authError.status).json({ error: authError.message });
+        return;
+      }
+      const secretKey = await resolved.credential.getPlaintextKey();
+      const result = await getDownloadUrl(req.params.md5, secretKey);
+      if (result.error) {
+        res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
+        return;
+      }
+      res.json({ download_url: result.downloadUrl });
+    } finally {
+      resolved.credential.clear();
     }
-    const result = await getDownloadUrl(req.params.md5, secretKey);
-    if (result.error) {
-      res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
-      return;
-    }
-    res.json({ download_url: result.downloadUrl });
   }));
 
   // GET /api/read/:md5
@@ -233,32 +301,37 @@ if (transport === "stdio") {
       res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
       return;
     }
-    const secretKey = takeSecretKey(req);
-    const authError = keyValidationError(await validateKey(secretKey));
-    if (authError) {
-      res.status(authError.status).json({ error: authError.message });
-      return;
-    }
-    const doc = await getByMd5(req.params.md5);
-    const ext = doc?.extension || "pdf";
-    const parsed = parseReadQuery(req.query);
-    if (!parsed.ok) {
-      res.status(400).json({ error: parsed.error });
-      return;
-    }
+    const resolved = await resolveCredential(req, oauthProvider);
+    try {
+      const authError = keyValidationError(await resolved.credential.validateMembership());
+      if (authError) {
+        res.status(authError.status).json({ error: authError.message });
+        return;
+      }
+      const secretKey = await resolved.credential.getPlaintextKey();
+      const doc = await getByMd5(req.params.md5);
+      const ext = doc?.extension || "pdf";
+      const parsed = parseReadQuery(req.query);
+      if (!parsed.ok) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
 
-    const result = await readDocument(req.params.md5, ext, secretKey, parsed.value);
-    if (result.error) {
-      res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
-      return;
+      const result = await readDocument(req.params.md5, ext, secretKey, parsed.value);
+      if (result.error) {
+        res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
+        return;
+      }
+      res.json({
+        document: doc ? { title: doc.title, author: doc.author, format: doc.extension } : null,
+        text: result.text,
+        page_count: result.pageCount,
+        format: result.format,
+        chapters: result.chapters,
+      });
+    } finally {
+      resolved.credential.clear();
     }
-    res.json({
-      document: doc ? { title: doc.title, author: doc.author, format: doc.extension } : null,
-      text: result.text,
-      page_count: result.pageCount,
-      format: result.format,
-      chapters: result.chapters,
-    });
   }));
 
   // GET /api/stats
@@ -273,17 +346,22 @@ if (transport === "stdio") {
       res.status(400).json({ error: "md5 must be exactly 32 hexadecimal characters." });
       return;
     }
-    const authError = keyValidationError(await validateKey(takeSecretKey(req)));
-    if (authError) {
-      res.status(authError.status).json({ error: authError.message });
-      return;
+    const resolved = await resolveCredential(req, oauthProvider);
+    try {
+      const authError = keyValidationError(await resolved.credential.validateMembership());
+      if (authError) {
+        res.status(authError.status).json({ error: authError.message });
+        return;
+      }
+      const doc = await getByMd5(req.params.md5);
+      if (!doc) {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+      res.json(doc);
+    } finally {
+      resolved.credential.clear();
     }
-    const doc = await getByMd5(req.params.md5);
-    if (!doc) {
-      res.status(404).json({ error: "Not found" });
-      return;
-    }
-    res.json(doc);
   }));
 
   app.use((
@@ -301,6 +379,7 @@ if (transport === "stdio") {
       ? (error as { status?: unknown }).status
       : undefined;
     const status = candidateStatus === 400 ||
+        candidateStatus === 401 ||
         candidateStatus === 413 ||
         candidateStatus === 415
       ? candidateStatus
@@ -309,8 +388,13 @@ if (transport === "stdio") {
       const message = error instanceof Error ? error.message : "Unknown request failure";
       console.error(`Unhandled request error: ${message}`);
     }
+    if (status === 401 && resourceMetadataUrl) {
+      res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl}"`);
+    }
     res.status(status).json({
-      error: status === 400
+      error: status === 401
+        ? "Authentication is invalid or expired."
+        : status === 400
         ? "Invalid JSON request body."
         : status === 413
         ? "Request body is too large."
