@@ -6,6 +6,7 @@ on:
       - "server/**"
       - "docker-compose.yml"
       - ".env.example"
+      - "ingest/oauth-schema.sql"
       - "ingest/sync-password.sql"
       - ".github/workflows/server-checks.yml"
   push:
@@ -15,6 +16,7 @@ on:
       - "server/**"
       - "docker-compose.yml"
       - ".env.example"
+      - "ingest/oauth-schema.sql"
       - "ingest/sync-password.sql"
       - ".github/workflows/server-checks.yml"
 
@@ -53,6 +55,7 @@ jobs:
             -e POSTGRES_USER=annas \
             -e POSTGRES_PASSWORD=old-ci-password \
             -v "$PWD/ingest/sync-password.sql:/sync-password.sql:ro" \
+            -v "$PWD/ingest/oauth-schema.sql:/oauth-schema.sql:ro" \
             postgres:17-alpine
           database_ready=false
           for attempt in $(seq 1 30); do
@@ -74,6 +77,15 @@ jobs:
           docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
             psql --host 127.0.0.1 --username annas --dbname postgres \
             --command "SELECT 1"
+      - name: Test OAuth schema is repeatable
+        working-directory: .
+        run: |
+          docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
+            psql --host 127.0.0.1 --username annas --dbname annas \
+            --file /oauth-schema.sql
+          docker exec --env PGPASSWORD=new-ci-password aa-password-migration \
+            psql --host 127.0.0.1 --username annas --dbname annas \
+            --file /oauth-schema.sql
       - name: Clean up migration test
         if: always()
         working-directory: .
