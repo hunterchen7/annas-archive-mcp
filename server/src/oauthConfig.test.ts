@@ -39,4 +39,3 @@ describe("oauthConfigFromEnv", () => {
     }));
   });
 });
-

@@ -20,4 +20,3 @@ describe("publicClientOAuthMetadata", () => {
     assert.equal(metadata.revocation_endpoint, "https://mcp.example.test/revoke");
   });
 });
-
