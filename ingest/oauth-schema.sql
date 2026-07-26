@@ -28,11 +28,39 @@ CREATE TABLE IF NOT EXISTS oauth_connections (
     key_iv              TEXT NOT NULL,
     key_tag             TEXT NOT NULL,
     key_fingerprint     TEXT NOT NULL,
-    retention           TEXT NOT NULL CHECK (retention IN ('persistent', 'session')),
+    retention           TEXT NOT NULL,
     last_validated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at          TIMESTAMPTZ,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS oauth_schema_metadata (
+    singleton           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    version             INTEGER NOT NULL
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM oauth_schema_metadata
+        WHERE singleton = TRUE AND version >= 2
+    ) THEN
+        ALTER TABLE oauth_connections
+            DROP CONSTRAINT IF EXISTS oauth_connections_retention_check;
+        ALTER TABLE oauth_connections
+            ADD CONSTRAINT oauth_connections_retention_check
+            CHECK (retention IN (
+                'persistent', 'days_30', 'days_14', 'days_7', 'session'
+            ));
+    END IF;
+END
+$$;
+
+INSERT INTO oauth_schema_metadata (singleton, version)
+VALUES (TRUE, 2)
+ON CONFLICT (singleton) DO UPDATE
+SET version = GREATEST(oauth_schema_metadata.version, EXCLUDED.version);
 
 CREATE INDEX IF NOT EXISTS idx_oauth_connections_expiry
     ON oauth_connections (expires_at)

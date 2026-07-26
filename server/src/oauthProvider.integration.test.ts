@@ -5,6 +5,7 @@ import type { Response } from "express";
 import pg from "pg";
 import { KeyProtector, opaqueToken } from "./oauthCrypto.js";
 import { PostgresOAuthProvider } from "./oauthProvider.js";
+import type { Retention } from "./oauthRetention.js";
 
 const databaseUrl = process.env.OAUTH_INTEGRATION_DATABASE_URL;
 const integrationTest = databaseUrl ? test : test.skip;
@@ -25,7 +26,10 @@ function pkceChallenge(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url");
 }
 
-async function linkedFlow(retention: "persistent" | "session"): Promise<Flow> {
+async function linkedFlow(
+  retention: Retention,
+  now?: () => Date,
+): Promise<Flow> {
   if (!pool) throw new Error("Integration database is not configured.");
   const provider = new PostgresOAuthProvider({
     pool,
@@ -35,6 +39,7 @@ async function linkedFlow(retention: "persistent" | "session"): Promise<Flow> {
     validateKey: async (key) => key === "membership-secret"
       ? { ok: true }
       : { ok: false, reason: "invalid" },
+    now,
   });
   const registerClient = provider.clientsStore.registerClient;
   if (!registerClient) throw new Error("Dynamic registration is unavailable.");
@@ -171,6 +176,106 @@ describe("PostgresOAuthProvider", () => {
     await pool.query(
       "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
     );
+    await flow.provider.cleanupExpired();
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
+      0,
+    );
+  });
+
+  integrationTest("expires refreshable connections after 7, 14, or 30 days", async () => {
+    if (!pool) return;
+    for (const [retention, expectedDays] of [
+      ["days_7", 7],
+      ["days_14", 14],
+      ["days_30", 30],
+    ] as const) {
+      await pool.query("TRUNCATE oauth_clients CASCADE");
+      const flow = await linkedFlow(retention);
+      const activatedBefore = Date.now();
+      const tokens = await flow.provider.exchangeAuthorizationCode(
+        flow.client,
+        flow.authorizationCode,
+        undefined,
+        flow.client.redirect_uris[0],
+      );
+      const activatedAfter = Date.now();
+      assert.ok(tokens.refresh_token);
+
+      const stored: pg.QueryResult<{ retention: string; expires_at: Date }> =
+        await pool.query(
+          "SELECT retention, expires_at FROM oauth_connections",
+        );
+      assert.equal(stored.rows[0].retention, retention);
+      const expiresAt = stored.rows[0].expires_at;
+      const expectedTtl = expectedDays * 24 * 60 * 60 * 1000;
+      assert.ok(expiresAt.getTime() >= activatedBefore + expectedTtl);
+      assert.ok(expiresAt.getTime() <= activatedAfter + expectedTtl);
+
+      await pool.query(
+        "UPDATE oauth_connections SET expires_at = now() + interval '30 minutes'",
+      );
+      const rotated = await flow.provider.exchangeRefreshToken(
+        flow.client,
+        tokens.refresh_token,
+      );
+      assert.ok(rotated.refresh_token);
+      const expiresIn = rotated.expires_in;
+      assert.ok(expiresIn);
+      assert.ok(expiresIn > 0);
+      assert.ok(expiresIn <= 30 * 60);
+
+      await pool.query(
+        "UPDATE oauth_connections SET expires_at = now() - interval '1 second'",
+      );
+      await assert.rejects(
+        () => flow.provider.exchangeRefreshToken(flow.client, rotated.refresh_token!),
+        /expired/,
+      );
+      await flow.provider.cleanupExpired();
+      assert.equal(
+        Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
+        0,
+      );
+    }
+  });
+
+  integrationTest("rolls back refresh when less than one second remains", async () => {
+    if (!pool) return;
+    let currentTime = new Date("2026-07-26T18:00:00.000Z");
+    const flow = await linkedFlow("days_7", () => currentTime);
+    const tokens = await flow.provider.exchangeAuthorizationCode(
+      flow.client,
+      flow.authorizationCode,
+      undefined,
+      flow.client.redirect_uris[0],
+    );
+    assert.ok(tokens.refresh_token);
+    await pool.query(
+      "UPDATE oauth_connections SET expires_at = $1",
+      [new Date(currentTime.getTime() + 500)],
+    );
+
+    await assert.rejects(
+      () => flow.provider.exchangeRefreshToken(flow.client, tokens.refresh_token!),
+      /expired/,
+    );
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
+      1,
+    );
+    assert.equal(
+      Number((await pool.query(
+        "SELECT count(*) FROM oauth_refresh_tokens WHERE consumed_at IS NULL",
+      )).rows[0].count),
+      1,
+    );
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM oauth_access_tokens")).rows[0].count),
+      1,
+    );
+
+    currentTime = new Date(currentTime.getTime() + 1_000);
     await flow.provider.cleanupExpired();
     assert.equal(
       Number((await pool.query("SELECT count(*) FROM oauth_connections")).rows[0].count),
