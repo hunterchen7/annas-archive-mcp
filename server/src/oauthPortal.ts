@@ -4,6 +4,7 @@ import {
   oauthCsrfCookieName,
   type PostgresOAuthProvider,
 } from "./oauthProvider.js";
+import { isRetention } from "./oauthRetention.js";
 
 const MAX_KEY_BYTES = 512;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,256}$/;
@@ -71,7 +72,7 @@ function disclosures(): string {
   <ol>
     <li><strong>When you link:</strong> this server receives the key over HTTPS and sends it to Anna's Archive's account endpoint to verify it. Only after validation does it encrypt the key.</li>
     <li><strong>When you download or read:</strong> the server decrypts the key in process memory for that request so it can request the file from Anna's Archive.</li>
-    <li><strong>At most once every 24 hours during persistent-token refresh:</strong> the server decrypts and revalidates the key. Token refresh is automatic in compatible clients.</li>
+    <li><strong>At most once every 24 hours during refreshable connections:</strong> the server decrypts and revalidates the key. Token refresh is automatic in compatible clients.</li>
   </ol>
   <p>Normal metadata searches use the prior validation and <strong>do not decrypt the key</strong>.</p>
 </section>
@@ -126,6 +127,21 @@ ${disclosures()}
     <small>Recommended. The encrypted key has no automatic expiry. Access tokens are short-lived and refresh automatically; revoking the connection deletes the encrypted key.</small>
   </label>
   <label class="choice">
+    <input type="radio" name="retention" value="days_30">
+    <strong>30 days</strong>
+    <small>The encrypted connection expires 30 days after OAuth activation. Access tokens refresh automatically until then.</small>
+  </label>
+  <label class="choice">
+    <input type="radio" name="retention" value="days_14">
+    <strong>14 days</strong>
+    <small>The encrypted connection expires 14 days after OAuth activation. Access tokens refresh automatically until then.</small>
+  </label>
+  <label class="choice">
+    <input type="radio" name="retention" value="days_7">
+    <strong>7 days</strong>
+    <small>The encrypted connection expires 7 days after OAuth activation. Access tokens refresh automatically until then.</small>
+  </label>
+  <label class="choice">
     <input type="radio" name="retention" value="session">
     <strong>One-hour session</strong>
     <small>Access expires after one hour and there is no refresh token. The encrypted row is deleted by the next hourly cleanup, or later if the service is not running.</small>
@@ -143,7 +159,8 @@ ${disclosures()}
 <section class="card">
   <h2>Retention and deletion</h2>
   <p><strong>Until I disconnect</strong> has no automatic expiry after the client completes the OAuth code exchange. Before that exchange, the encrypted record is provisional and expires with the five-minute authorization code. An active connection remains until the client calls OAuth revocation, the same key is relinked for that client, or an operator deletes it.</p>
-  <p><strong>One-hour session</strong> creates no refresh token. Access expires after one hour. Its encrypted row is then deleted by the hourly cleanup task (which also runs on server startup), normally within the following hour and later if the service is not running.</p>
+  <p><strong>7, 14, or 30 days</strong> starts when the client successfully exchanges the OAuth code. The client receives refresh tokens until that deadline. At the deadline, access stops even if cleanup has not run yet; the encrypted row is deleted by the next hourly cleanup, or later if the service is not running.</p>
+  <p><strong>One-hour session</strong> starts when the client successfully exchanges the OAuth code and creates no refresh token. Access expires after one hour. Its encrypted row is then deleted by the hourly cleanup task (which also runs on server startup), normally within the following hour and later if the service is not running.</p>
   <p>Legacy <code>X-Annas-Secret-Key</code> requests are not persisted: their key remains request-scoped, apart from a short-lived process-local keyed validation verdict.</p>
 </section>`, "Membership-key handling");
 }
@@ -205,7 +222,7 @@ export function oauthPortalRouter(provider: PostgresOAuthProvider): Router {
       ) {
         throw new PortalInputError("Enter a valid linking request and membership key.");
       }
-      if (retentionValue !== "persistent" && retentionValue !== "session") {
+      if (!isRetention(retentionValue)) {
         throw new PortalInputError("Choose a valid connection retention option.");
       }
       if (!trustsDestination) {

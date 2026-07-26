@@ -26,17 +26,19 @@ import {
   tokenHash,
   type EncryptedSecret,
 } from "./oauthCrypto.js";
+import {
+  retentionAllowsRefresh,
+  retentionExpiresAt,
+  type Retention,
+} from "./oauthRetention.js";
 
 const SCOPE = "annas:use";
 const AUTHORIZATION_REQUEST_TTL_MS = 10 * 60 * 1000;
 const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
-const SESSION_TTL_MS = ACCESS_TOKEN_TTL_SECONDS * 1000;
 const REVALIDATE_AFTER_MS = 24 * 60 * 60 * 1000;
 const USED_REFRESH_TOKEN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const UNUSED_CLIENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-
-type Retention = "persistent" | "session";
 
 interface AuthorizationRequestRow {
   client_id: string;
@@ -295,9 +297,8 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
     const authorizationCodeExpiresAt = new Date(
       this.now().getTime() + AUTHORIZATION_CODE_TTL_MS,
     );
-    const connectionExpiresAt = retention === "session"
-      ? new Date(this.now().getTime() + SESSION_TTL_MS)
-      : authorizationCodeExpiresAt;
+    // All links remain provisional until the client exchanges the OAuth code.
+    const connectionExpiresAt = authorizationCodeExpiresAt;
     const database = await this.pool.connect();
     try {
       await database.query("BEGIN");
@@ -420,19 +421,14 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       if (!sameResource(code.resource, resource)) {
         throw new InvalidGrantError("resource does not match the authorization request.");
       }
-      const persistent = await this.isPersistent(database, code.connection_id);
-      if (persistent) {
-        await database.query(
-          "UPDATE oauth_connections SET expires_at = NULL WHERE id = $1",
-          [code.connection_id],
-        );
-      }
+      const activated = await this.activateConnection(database, code.connection_id);
       const tokens = await this.issueTokens(database, {
         clientId: code.client_id,
         connectionId: code.connection_id,
         scopes: code.scopes,
         resource: code.resource,
-        includeRefreshToken: persistent,
+        includeRefreshToken: retentionAllowsRefresh(activated.retention),
+        connectionExpiresAt: activated.expiresAt,
       });
       await database.query("COMMIT");
       return tokens;
@@ -523,6 +519,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
         resource: initial.resource,
         includeRefreshToken: true,
         familyId: initial.family_id,
+        connectionExpiresAt: initial.expires_at,
       });
       await database.query("COMMIT");
       transactionOpen = false;
@@ -556,14 +553,24 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
     return result.rows[0] as RefreshTokenRow | undefined;
   }
 
-  private async isPersistent(database: PoolClient, connectionId: string): Promise<boolean> {
+  private async activateConnection(
+    database: PoolClient,
+    connectionId: string,
+  ): Promise<{ retention: Retention; expiresAt: Date | null }> {
     const result = await database.query(
       `SELECT retention FROM oauth_connections
-       WHERE id = $1 AND (expires_at IS NULL OR expires_at > $2)`,
+       WHERE id = $1 AND expires_at > $2
+       FOR UPDATE`,
       [connectionId, this.now()],
     );
     if (!result.rows[0]) throw new InvalidGrantError("Linked connection is expired.");
-    return result.rows[0].retention === "persistent";
+    const retention = result.rows[0].retention as Retention;
+    const expiresAt = retentionExpiresAt(retention, this.now());
+    await database.query(
+      "UPDATE oauth_connections SET expires_at = $2 WHERE id = $1",
+      [connectionId, expiresAt],
+    );
+    return { retention, expiresAt };
   }
 
   private async issueTokens(
@@ -575,10 +582,28 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       resource: string | null;
       includeRefreshToken: boolean;
       familyId?: string;
+      connectionExpiresAt?: Date | null;
     },
   ): Promise<OAuthTokens> {
     const accessToken = opaqueToken();
-    const expiresAt = new Date(this.now().getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000);
+    const issuedAt = this.now();
+    const normalExpiresAt = new Date(
+      issuedAt.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000,
+    );
+    if (
+      options.connectionExpiresAt &&
+      options.connectionExpiresAt <= issuedAt
+    ) {
+      throw new InvalidGrantError("Linked connection is expired.");
+    }
+    const expiresAt = options.connectionExpiresAt &&
+        options.connectionExpiresAt < normalExpiresAt
+      ? options.connectionExpiresAt
+      : normalExpiresAt;
+    const expiresIn = Math.max(
+      1,
+      Math.floor((expiresAt.getTime() - issuedAt.getTime()) / 1000),
+    );
     await database.query(
       `INSERT INTO oauth_access_tokens
        (token_hash, client_id, connection_id, scopes, resource, expires_at)
@@ -612,7 +637,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
     return {
       access_token: accessToken,
       token_type: "Bearer",
-      expires_in: ACCESS_TOKEN_TTL_SECONDS,
+      expires_in: expiresIn,
       scope: options.scopes.join(" "),
       refresh_token: refreshToken,
     };

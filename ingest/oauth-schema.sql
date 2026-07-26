@@ -28,11 +28,17 @@ CREATE TABLE IF NOT EXISTS oauth_connections (
     key_iv              TEXT NOT NULL,
     key_tag             TEXT NOT NULL,
     key_fingerprint     TEXT NOT NULL,
-    retention           TEXT NOT NULL CHECK (retention IN ('persistent', 'session')),
+    retention           TEXT NOT NULL,
     last_validated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at          TIMESTAMPTZ,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE oauth_connections
+    DROP CONSTRAINT IF EXISTS oauth_connections_retention_check;
+ALTER TABLE oauth_connections
+    ADD CONSTRAINT oauth_connections_retention_check
+    CHECK (retention IN ('persistent', 'days_30', 'days_14', 'days_7', 'session'));
 
 CREATE INDEX IF NOT EXISTS idx_oauth_connections_expiry
     ON oauth_connections (expires_at)

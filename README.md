@@ -137,8 +137,9 @@ disclosure before linking. No connector-server signup is required.
 
 The default retention choice is **Until I disconnect**. Its encrypted key has
 no automatic expiry, while one-hour access tokens refresh automatically. An
-optional **One-hour session** stores the encrypted key only for that session
-and issues no refresh token.
+optional **7 days**, **14 days**, or **30 days** choice refreshes automatically
+until its fixed deadline. A **One-hour session** stores the encrypted key only
+for that session and issues no refresh token.
 
 ### Legacy header mode
 
@@ -198,8 +199,9 @@ key:
   requires that key in an outbound HTTPS query parameter, where Anna's Archive
   and any egress proxy/tracer can observe it. Operators must redact or disable
   outbound query-string logging.
-- **Periodic validation:** persistent connections decrypt and revalidate the
-  key at most once every 24 hours during automatic token refresh.
+- **Periodic validation:** persistent and fixed-day connections decrypt and
+  revalidate the key at most once every 24 hours during automatic token
+  refresh.
 - **At rest:** PostgreSQL stores AES-256-GCM ciphertext, a random nonce,
   authentication tag, and a keyed HMAC fingerprint. The master key is kept in
   server configuration, outside PostgreSQL.
@@ -208,9 +210,11 @@ key:
   accessing the key. JavaScript strings also cannot be reliably zeroed from
   process memory.
 - **Deletion:** OAuth revocation/disconnect deletes the encrypted key.
-  Persistent connections otherwise have no automatic expiry. Session
-  access expires after one hour; its database row is deleted by hourly cleanup
-  (which also runs at startup), normally within the following hour.
+  Persistent connections otherwise have no automatic expiry. Fixed-day
+  connections stop authorizing access 7, 14, or 30 days after OAuth activation.
+  Session access expires after one hour. Expired database rows are deleted by
+  hourly cleanup (which also runs at startup), normally within the following
+  hour and later if the service is not running.
 - **Deletion limits:** active database rows are deleted, but encrypted
   ciphertext can remain in PostgreSQL WAL, replicas, snapshots, and backups
   until the operator's retention windows expire. A global master key can still
