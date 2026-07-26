@@ -199,9 +199,10 @@ key:
   requires that key in an outbound HTTPS query parameter, where Anna's Archive
   and any egress proxy/tracer can observe it. Operators must redact or disable
   outbound query-string logging.
-- **Periodic validation:** persistent and fixed-day connections decrypt and
-  revalidate the key at most once every 24 hours during automatic token
-  refresh.
+- **Periodic validation:** after 24 hours since the last successful validation,
+  a token-refresh attempt for a persistent or fixed-day connection decrypts and
+  revalidates the key. Concurrent refreshes, or retries after Anna's Archive
+  was unreachable, can cause additional decryptions and validation requests.
 - **At rest:** PostgreSQL stores AES-256-GCM ciphertext, a random nonce,
   authentication tag, and a keyed HMAC fingerprint. The master key is kept in
   server configuration, outside PostgreSQL.

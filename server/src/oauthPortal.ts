@@ -72,7 +72,7 @@ function disclosures(): string {
   <ol>
     <li><strong>When you link:</strong> this server receives the key over HTTPS and sends it to Anna's Archive's account endpoint to verify it. Only after validation does it encrypt the key.</li>
     <li><strong>When you download or read:</strong> the server decrypts the key in process memory for that request so it can request the file from Anna's Archive.</li>
-    <li><strong>At most once every 24 hours during refreshable connections:</strong> the server decrypts and revalidates the key. Token refresh is automatic in compatible clients.</li>
+    <li><strong>During refreshable connections:</strong> after 24 hours since the last successful validation, a token-refresh attempt decrypts and revalidates the key. Concurrent refreshes, or retries after Anna's Archive was unreachable, can cause additional decryptions and validation requests.</li>
   </ol>
   <p>Normal metadata searches use the prior validation and <strong>do not decrypt the key</strong>.</p>
 </section>
@@ -129,17 +129,17 @@ ${disclosures()}
   <label class="choice">
     <input type="radio" name="retention" value="days_30">
     <strong>30 days</strong>
-    <small>The encrypted connection expires 30 days after OAuth activation. Access tokens refresh automatically until then.</small>
+    <small>Access stops 30 days after OAuth activation. The encrypted row is deleted by the next hourly cleanup, or later if the service is not running.</small>
   </label>
   <label class="choice">
     <input type="radio" name="retention" value="days_14">
     <strong>14 days</strong>
-    <small>The encrypted connection expires 14 days after OAuth activation. Access tokens refresh automatically until then.</small>
+    <small>Access stops 14 days after OAuth activation. The encrypted row is deleted by the next hourly cleanup, or later if the service is not running.</small>
   </label>
   <label class="choice">
     <input type="radio" name="retention" value="days_7">
     <strong>7 days</strong>
-    <small>The encrypted connection expires 7 days after OAuth activation. Access tokens refresh automatically until then.</small>
+    <small>Access stops 7 days after OAuth activation. The encrypted row is deleted by the next hourly cleanup, or later if the service is not running.</small>
   </label>
   <label class="choice">
     <input type="radio" name="retention" value="session">
