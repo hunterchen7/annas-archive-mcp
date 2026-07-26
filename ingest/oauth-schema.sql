@@ -1,5 +1,7 @@
 \set ON_ERROR_STOP on
 
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id           TEXT PRIMARY KEY,
     metadata            JSONB NOT NULL,
@@ -87,3 +89,5 @@ CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family
 CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_consumed
     ON oauth_refresh_tokens (consumed_at)
     WHERE consumed_at IS NOT NULL;
+
+COMMIT;

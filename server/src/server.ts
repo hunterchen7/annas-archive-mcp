@@ -149,7 +149,7 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
       const result = await getDownloadUrl(md5, secretKey);
 
       if (result.error) {
-        if (/invalid secret key/i.test(result.error)) {
+        if (result.errorCode === "invalid_membership_key") {
           await credential.invalidate();
         }
         return { content: [{ type: "text", text: `Download failed: ${result.error}` }], isError: true };
@@ -254,7 +254,7 @@ TYPICAL WORKFLOW:
       const result = await readDocument(md5, ext, secretKey, opts);
 
       if (result.error) {
-        if (/invalid secret key/i.test(result.error)) {
+        if (result.errorCode === "invalid_membership_key") {
           await credential.invalidate();
         }
         return { content: [{ type: "text", text: `Read failed: ${result.error}` }], isError: true };

@@ -82,7 +82,8 @@ function disclosures(): string {
     <li>The separate server encryption secret is required to decrypt a database copy.</li>
     <li>Encryption at rest does <strong>not</strong> prevent the running application or an operator who controls both the application and its encryption secret from accessing the key.</li>
     <li>Plaintext can remain in ordinary JavaScript process memory until the request finishes. JavaScript strings cannot be reliably zeroed.</li>
-    <li>The application does not intentionally put the key in URLs, cookies, browser storage, application logs, or OAuth tokens. TLS proxies and infrastructure must also be configured not to log request bodies or secret headers.</li>
+    <li>The key is never placed in this portal's inbound URL, the OAuth callback URL, cookies, browser storage, application logs, or OAuth tokens.</li>
+    <li><strong>Outbound URL exception:</strong> Anna's Archive's fast-download API requires the real key in the query string of an outbound HTTPS request during download/read. Anna's Archive and any egress proxy or tracer can observe it there. Operators must disable or redact outbound URL query logging.</li>
     <li>Deleting an active row does not instantly erase encrypted copies from PostgreSQL WAL, replicas, snapshots, or backups. Those copies remain until the operator's retention windows expire, and the global master key can decrypt them while it is retained.</li>
   </ul>
 </section>`;
@@ -127,7 +128,7 @@ ${disclosures()}
   <label class="choice">
     <input type="radio" name="retention" value="session">
     <strong>One-hour session</strong>
-    <small>The key is still encrypted at rest, but the connection has no refresh token and is automatically deleted after one hour.</small>
+    <small>Access expires after one hour and there is no refresh token. The encrypted row is deleted by the next hourly cleanup, or later if the service is not running.</small>
   </label>
   <button type="submit">Validate key and link</button>
 </form>

@@ -172,8 +172,11 @@ included Cloudflare Tunnel:
 docker compose --profile tunnel up -d
 ```
 
-Secret keys in URL query parameters are always rejected because URLs are
-commonly retained by browsers, proxies, analytics, and request logs.
+Secret keys in inbound connector URL query parameters are always rejected
+because those URLs are commonly retained by browsers, proxies, analytics, and
+request logs. Anna's Archive's fast-download API separately requires the key
+in its outbound HTTPS query string during download/read; see the disclosure
+below.
 
 ### Key handling and plaintext disclosure
 
@@ -191,7 +194,10 @@ key:
 - **Search:** OAuth metadata searches use the previously validated connection.
   They do not decrypt the stored key.
 - **Download and read:** the key is decrypted in process memory for the active
-  request because Anna's Archive requires the real key.
+  request because Anna's Archive requires the real key. Its fast-download API
+  requires that key in an outbound HTTPS query parameter, where Anna's Archive
+  and any egress proxy/tracer can observe it. Operators must redact or disable
+  outbound query-string logging.
 - **Periodic validation:** persistent connections decrypt and revalidate the
   key at most once every 24 hours during automatic token refresh.
 - **At rest:** PostgreSQL stores AES-256-GCM ciphertext, a random nonce,
@@ -214,10 +220,11 @@ key:
   PostgreSQL. Only a short-lived process-local HMAC validation verdict is
   cached.
 
-The application does not intentionally place membership keys in URLs, cookies,
-OAuth tokens, browser storage, or application logs. Operators must still
-configure TLS termination, tracing, error reporting, database backups, and
-host access consistently with that policy. These controls are inspectable
+The application does not place membership keys in inbound portal/callback URLs,
+cookies, OAuth tokens, browser storage, or application logs. The outbound
+fast-download query parameter above is the explicit exception. Operators must
+configure TLS termination, egress tracing, error reporting, database backups,
+and host access consistently with that policy. These controls are inspectable
 implementation and operational guarantees, not zero-knowledge proof.
 
 ## Collections

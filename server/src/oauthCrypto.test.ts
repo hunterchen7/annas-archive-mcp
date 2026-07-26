@@ -25,11 +25,13 @@ describe("KeyProtector", () => {
   test("binds ciphertext to its connection and detects tampering", () => {
     const protector = new KeyProtector(masterKey);
     const encrypted = protector.encrypt("membership-secret", "connection-a");
+    const tamperedCiphertext = Buffer.from(encrypted.ciphertext, "base64url");
+    tamperedCiphertext[0] ^= 1;
 
     assert.throws(() => protector.decrypt(encrypted, "connection-b"));
     assert.throws(() => protector.decrypt({
       ...encrypted,
-      ciphertext: `${encrypted.ciphertext.slice(0, -1)}A`,
+      ciphertext: tamperedCiphertext.toString("base64url"),
     }, "connection-a"));
   });
 

@@ -229,7 +229,15 @@ if (transport === "stdio") {
     if (pendingDatabaseHealth) return pendingDatabaseHealth;
 
     const healthQuery = oauthProvider
-      ? "SELECT to_regclass('public.oauth_clients') IS NOT NULL AS oauth_schema_ready"
+      ? `SELECT
+           to_regclass('public.oauth_clients') IS NOT NULL
+           AND to_regclass('public.oauth_authorization_requests') IS NOT NULL
+           AND to_regclass('public.oauth_connections') IS NOT NULL
+           AND to_regclass('public.oauth_authorization_codes') IS NOT NULL
+           AND to_regclass('public.oauth_access_tokens') IS NOT NULL
+           AND to_regclass('public.oauth_refresh_tokens') IS NOT NULL
+           AND to_regclass('public.idx_oauth_connections_client_key') IS NOT NULL
+           AS oauth_schema_ready`
       : "SELECT true AS oauth_schema_ready";
     const check = pool.query(healthQuery)
       .then((result) => result.rows[0]?.oauth_schema_ready === true)
@@ -301,10 +309,12 @@ if (transport === "stdio") {
       const secretKey = await resolved.credential.getPlaintextKey();
       const result = await getDownloadUrl(req.params.md5, secretKey);
       if (result.error) {
-        if (/invalid secret key/i.test(result.error)) {
+        if (result.errorCode === "invalid_membership_key") {
           await resolved.credential.invalidate();
         }
-        res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
+        res.status(result.errorCode === "invalid_membership_key" ? 401 : 502).json({
+          error: result.error,
+        });
         return;
       }
       res.json({ download_url: result.downloadUrl });
@@ -326,21 +336,23 @@ if (transport === "stdio") {
         res.status(authError.status).json({ error: authError.message });
         return;
       }
-      const secretKey = await resolved.credential.getPlaintextKey();
-      const doc = await getByMd5(req.params.md5);
-      const ext = doc?.extension || "pdf";
       const parsed = parseReadQuery(req.query);
       if (!parsed.ok) {
         res.status(400).json({ error: parsed.error });
         return;
       }
+      const secretKey = await resolved.credential.getPlaintextKey();
+      const doc = await getByMd5(req.params.md5);
+      const ext = doc?.extension || "pdf";
 
       const result = await readDocument(req.params.md5, ext, secretKey, parsed.value);
       if (result.error) {
-        if (/invalid secret key/i.test(result.error)) {
+        if (result.errorCode === "invalid_membership_key") {
           await resolved.credential.invalidate();
         }
-        res.status(result.error.includes("secret key") ? 401 : 502).json({ error: result.error });
+        res.status(result.errorCode === "invalid_membership_key" ? 401 : 502).json({
+          error: result.error,
+        });
         return;
       }
       res.json({

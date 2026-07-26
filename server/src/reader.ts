@@ -2,7 +2,11 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { randomUUID } from "node:crypto";
-import { getDownloadUrl } from "./download.js";
+import {
+  getDownloadUrl,
+  InvalidMembershipKeyError,
+  type DownloadErrorCode,
+} from "./download.js";
 import { FileCache } from "./cache.js";
 import { MemoryTextCache } from "./memoryCache.js";
 import { keyValidationError, validateKey } from "./auth.js";
@@ -61,6 +65,7 @@ interface ReadResult {
   format?: string;
   chapters?: Chapter[];
   error?: string;
+  errorCode?: DownloadErrorCode;
 }
 
 // Magic bytes for format detection — accepts either a file path or a Buffer
@@ -163,6 +168,9 @@ async function downloadFile(md5: string, secretKey: string): Promise<{ filePath:
 
   const result = await getDownloadUrl(md5, secretKey);
   if (result.error || !result.downloadUrl) {
+    if (result.errorCode === "invalid_membership_key") {
+      throw new InvalidMembershipKeyError(result.error);
+    }
     throw new Error(result.error || "No download URL");
   }
 
@@ -575,6 +583,9 @@ async function readInMemory(md5: string, secretKey: string): Promise<{ text: str
 
   const result = await getDownloadUrl(md5, secretKey);
   if (result.error || !result.downloadUrl) {
+    if (result.errorCode === "invalid_membership_key") {
+      throw new InvalidMembershipKeyError(result.error);
+    }
     throw new Error(result.error || "No download URL");
   }
 
@@ -600,9 +611,15 @@ export async function readDocument(
   opts: ReadOptions = {}
 ): Promise<ReadResult> {
   md5 = md5.toLowerCase();
-  const authError = keyValidationError(await validateKey(secretKey));
+  const validation = await validateKey(secretKey);
+  const authError = keyValidationError(validation);
   if (authError) {
-    return { error: authError.message };
+    return {
+      error: authError.message,
+      errorCode: !validation.ok && validation.reason === "invalid"
+        ? "invalid_membership_key"
+        : undefined,
+    };
   }
   if (activeReads >= MAX_CONCURRENT_READS) {
     return {
@@ -622,7 +639,12 @@ export async function readDocument(
       filePath = file.filePath;
       format = file.format;
     } catch (e) {
-      return { error: `Failed to download: ${e}` };
+      return {
+        error: `Failed to download: ${e}`,
+        errorCode: e instanceof InvalidMembershipKeyError
+          ? "invalid_membership_key"
+          : undefined,
+      };
     }
     try {
       fullText = ensureTextDisk(md5, filePath, format);
@@ -635,7 +657,12 @@ export async function readDocument(
       fullText = r.text;
       format = r.format;
     } catch (e) {
-      return { error: `Failed to read: ${e}` };
+      return {
+        error: `Failed to read: ${e}`,
+        errorCode: e instanceof InvalidMembershipKeyError
+          ? "invalid_membership_key"
+          : undefined,
+      };
     }
   }
 
