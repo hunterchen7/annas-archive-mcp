@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import {
   InvalidGrantError,
   ServerError,
+  TemporarilyUnavailableError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import {
   callbackPage,
@@ -98,5 +99,21 @@ describe("OAuth portal terminal responses", () => {
       ),
       databaseError,
     );
+  });
+
+  test("marks temporary upstream failures as retryable", async () => {
+    const provider = {
+      async getLinkRequest() {
+        return undefined;
+      },
+    };
+
+    const resolution = await resolvePortalErrorPage(
+      provider,
+      new TemporarilyUnavailableError("Anna's Archive could not be reached."),
+      "a".repeat(32),
+    );
+
+    assert.equal(resolution?.status, 503);
   });
 });

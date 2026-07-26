@@ -236,7 +236,7 @@ export async function resolvePortalErrorPage(
   provider: Pick<PostgresOAuthProvider, "getLinkRequest">,
   error: unknown,
   requestToken: string,
-): Promise<{ page: string; link?: LinkRequest } | undefined> {
+): Promise<{ page: string; status: 400 | 503; link?: LinkRequest } | undefined> {
   const validRequestToken = TOKEN_PATTERN.test(requestToken);
   if (!(
     error instanceof InvalidGrantError ||
@@ -250,6 +250,7 @@ export async function resolvePortalErrorPage(
     : undefined;
   return {
     page: portalErrorPage(error, validRequestToken, link)!,
+    status: error instanceof TemporarilyUnavailableError ? 503 : 400,
     link,
   };
 }
@@ -339,7 +340,7 @@ export function oauthPortalRouter(provider: PostgresOAuthProvider): Router {
         if (!errorResolution.link) {
           clearOauthCsrfCookie(req, res, requestToken);
         }
-        res.status(400).type("html").send(errorResolution.page);
+        res.status(errorResolution.status).type("html").send(errorResolution.page);
         return;
       }
       next(error);
