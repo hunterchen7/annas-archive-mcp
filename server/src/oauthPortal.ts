@@ -1,7 +1,11 @@
 import express, { type Request, type Response, type Router } from "express";
-import { OAuthError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import {
+  InvalidGrantError,
+  TemporarilyUnavailableError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import {
   oauthCsrfCookieName,
+  type LinkRequest,
   type PostgresOAuthProvider,
 } from "./oauthProvider.js";
 import { isRetention } from "./oauthRetention.js";
@@ -34,13 +38,18 @@ function cookie(req: Request, name: string): string {
   return "";
 }
 
-function page(content: string, title = "Link Anna's Archive"): string {
+function page(
+  content: string,
+  title = "Link Anna's Archive",
+  extraHead = "",
+): string {
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(title)}</title>
+  ${extraHead}
   <style>
     :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
     body { margin: 0; background: #101114; color: #f5f4ef; }
@@ -64,6 +73,18 @@ function page(content: string, title = "Link Anna's Archive"): string {
 </head>
 <body><main>${content}</main></body>
 </html>`;
+}
+
+export function callbackPage(redirectUrl: string): string {
+  const destination = new URL(redirectUrl);
+  const escapedUrl = escapeHtml(redirectUrl);
+  return page(`
+<h1>Key linked</h1>
+<p>Returning you to <strong>${escapeHtml(destination.origin)}</strong> to finish the connection.</p>
+<p><a href="${escapedUrl}">Continue to your MCP client</a> if nothing happens automatically.</p>
+<p class="fine">The destination receives the one-time OAuth code, not your Anna's Archive key.</p>`,
+  "Returning to your MCP client",
+  `<meta http-equiv="refresh" content="0;url=${escapedUrl}">`);
 }
 
 function disclosures(): string {
@@ -165,6 +186,75 @@ ${disclosures()}
 </section>`, "Membership-key handling");
 }
 
+function clearOauthCsrfCookie(
+  req: Request,
+  res: Response,
+  requestToken: string,
+): void {
+  if (!TOKEN_PATTERN.test(requestToken)) return;
+  res.clearCookie(oauthCsrfCookieName(requestToken), {
+    httpOnly: true,
+    secure: req.secure,
+    sameSite: "lax",
+    path: "/oauth",
+  });
+}
+
+function unusableLinkPage(expired: boolean): string {
+  const heading = expired ? "Link expired" : "Invalid linking request";
+  return page(
+    `<h1>${heading}</h1>
+<p>This request can no longer create another connection. A previous submission may already have completed.</p>
+<p>Start the connection again from your MCP client to get a new link.</p>`,
+  );
+}
+
+export function portalErrorPage(
+  error: unknown,
+  validRequestToken: boolean,
+  link?: LinkRequest,
+): string | undefined {
+  if (!(
+    error instanceof InvalidGrantError ||
+    error instanceof TemporarilyUnavailableError ||
+    error instanceof PortalInputError
+  )) {
+    return undefined;
+  }
+  if (link) {
+    return linkPage(
+      link.requestToken,
+      link.clientName,
+      link.redirectUri,
+      error.message,
+    );
+  }
+  return unusableLinkPage(validRequestToken);
+}
+
+export async function resolvePortalErrorPage(
+  provider: Pick<PostgresOAuthProvider, "getLinkRequest">,
+  error: unknown,
+  requestToken: string,
+): Promise<{ page: string; status: 400 | 503; link?: LinkRequest } | undefined> {
+  const validRequestToken = TOKEN_PATTERN.test(requestToken);
+  if (!(
+    error instanceof InvalidGrantError ||
+    error instanceof TemporarilyUnavailableError ||
+    error instanceof PortalInputError
+  )) {
+    return undefined;
+  }
+  const link = validRequestToken
+    ? await provider.getLinkRequest(requestToken)
+    : undefined;
+  return {
+    page: portalErrorPage(error, validRequestToken, link)!,
+    status: error instanceof TemporarilyUnavailableError ? 503 : 400,
+    link,
+  };
+}
+
 function portalHeaders(_req: Request, res: Response, next: () => void): void {
   res.setHeader(
     "Content-Security-Policy",
@@ -236,24 +326,21 @@ export function oauthPortalRouter(provider: PostgresOAuthProvider): Router {
         membershipKey,
         retentionValue,
       );
-      res.clearCookie(cookieName, {
-        httpOnly: true,
-        secure: req.secure,
-        sameSite: "lax",
-        path: "/oauth",
-      });
-      res.redirect(302, completed.redirectUrl);
+      clearOauthCsrfCookie(req, res, requestToken);
+      res.status(200).type("html").send(callbackPage(completed.redirectUrl));
     } catch (error) {
-      const link = TOKEN_PATTERN.test(requestToken)
-        ? await provider.getLinkRequest(requestToken).catch(() => undefined)
-        : undefined;
-      if (link && (error instanceof OAuthError || error instanceof PortalInputError)) {
-        res.status(400).type("html").send(linkPage(
-          link.requestToken,
-          link.clientName,
-          link.redirectUri,
-          error.message,
-        ));
+      let errorResolution: Awaited<ReturnType<typeof resolvePortalErrorPage>>;
+      try {
+        errorResolution = await resolvePortalErrorPage(provider, error, requestToken);
+      } catch (lookupError) {
+        next(lookupError);
+        return;
+      }
+      if (errorResolution) {
+        if (!errorResolution.link) {
+          clearOauthCsrfCookie(req, res, requestToken);
+        }
+        res.status(errorResolution.status).type("html").send(errorResolution.page);
         return;
       }
       next(error);
