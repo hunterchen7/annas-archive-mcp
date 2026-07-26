@@ -29,7 +29,7 @@ export function keyValidationError(
   if (result.reason === "missing") {
     return {
       status: 401,
-      message: "An Anna's Archive membership secret key is required. Provide it via the X-Annas-Secret-Key header.",
+      message: "An Anna's Archive membership key is required. Link with OAuth or provide X-Annas-Secret-Key.",
     };
   }
   if (result.reason === "invalid") {
@@ -92,6 +92,18 @@ export async function validateKey(key: string): Promise<ValidationResult> {
   const pending = pendingValidations.get(identifier);
   if (pending) return pending;
 
+  const validation = validateUncached(key).finally(() => {
+    pendingValidations.delete(identifier);
+  });
+  pendingValidations.set(identifier, validation);
+  return validation;
+}
+
+export async function validateKeyLive(key: string): Promise<ValidationResult> {
+  if (!key) return { ok: false, reason: "missing" };
+  const identifier = cache.identifier(key);
+  const pending = pendingValidations.get(identifier);
+  if (pending) return pending;
   const validation = validateUncached(key).finally(() => {
     pendingValidations.delete(identifier);
   });

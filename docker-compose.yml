@@ -9,6 +9,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./ingest/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
       - ./ingest/sync-password.sql:/docker-entrypoint-initdb.d/02-sync-password.sql
+      - ./ingest/oauth-schema.sql:/docker-entrypoint-initdb.d/03-oauth-schema.sql
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     shm_size: 1gb
@@ -44,6 +45,8 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-loopback, linklocal, uniquelocal}
       TRANSPORT: ${TRANSPORT:-http}
       PORT: "3001"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      OAUTH_KEY_ENCRYPTION_KEY: ${OAUTH_KEY_ENCRYPTION_KEY:-}
       CACHE_MODE: ${CACHE_MODE:-memory}
       CACHE_DIR: /data/cache
       FILE_CACHE_MB: ${FILE_CACHE_MB:-2000}

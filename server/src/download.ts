@@ -10,14 +10,30 @@ interface FastDownloadResponse {
   error?: string;
 }
 
-export async function getDownloadUrl(md5: string, secretKey: string): Promise<{ downloadUrl?: string; error?: string }> {
+export type DownloadErrorCode = "invalid_membership_key";
+
+export interface DownloadResult {
+  downloadUrl?: string;
+  error?: string;
+  errorCode?: DownloadErrorCode;
+}
+
+export class InvalidMembershipKeyError extends Error {}
+
+export async function getDownloadUrl(md5: string, secretKey: string): Promise<DownloadResult> {
   if (!isMd5(md5)) {
     return { error: "Invalid MD5: expected exactly 32 hexadecimal characters." };
   }
   md5 = md5.toLowerCase();
-  const authError = keyValidationError(await validateKey(secretKey));
+  const validation = await validateKey(secretKey);
+  const authError = keyValidationError(validation);
   if (authError) {
-    return { error: authError.message };
+    return {
+      error: authError.message,
+      errorCode: !validation.ok && validation.reason === "invalid"
+        ? "invalid_membership_key"
+        : undefined,
+    };
   }
 
   let resp: FastDownloadResponse | undefined;
@@ -52,7 +68,10 @@ export async function getDownloadUrl(md5: string, secretKey: string): Promise<{ 
   if (resp.error) {
     if (resp.error === "Invalid secret key") {
       invalidateKey(secretKey);
-      return { error: "Invalid secret key. Check that your Anna's Archive membership secret key is correct. You can find it at https://annas-archive.gl/account ." };
+      return {
+        error: "Invalid secret key. Check that your Anna's Archive membership secret key is correct. You can find it at https://annas-archive.gl/account .",
+        errorCode: "invalid_membership_key",
+      };
     }
     return { error: "Anna's Archive rejected the download request." };
   }

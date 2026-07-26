@@ -3,18 +3,23 @@ import { z } from "zod";
 import { search, getByMd5, getStats } from "./db.js";
 import { getDownloadUrl } from "./download.js";
 import { readDocument } from "./reader.js";
-import { keyValidationError, validateKey } from "./auth.js";
+import { keyValidationError } from "./auth.js";
 import { MD5_PATTERN } from "./identifiers.js";
+import {
+  HeaderCredential,
+  type MembershipCredential,
+} from "./credential.js";
 
-export interface SecretLease {
-  value: string;
-}
+const oauthSecurity = {
+  securitySchemes: [{ type: "oauth2", scopes: ["annas:use"] }],
+};
 
-function readSecret(secret: string | SecretLease | undefined): string {
-  return typeof secret === "string" ? secret : secret?.value || "";
-}
-
-export function createServer(secretKey?: string | SecretLease): McpServer {
+export function createServer(
+  credentialOrKey: MembershipCredential | string = "",
+): McpServer {
+  const credential = typeof credentialOrKey === "string"
+    ? new HeaderCredential(credentialOrKey)
+    : credentialOrKey;
   const server = new McpServer({
     name: "annas-archive",
     version: "1.0.0",
@@ -24,7 +29,7 @@ Tools: search → download or read.
 
 search: Find documents using any combination of title, author, year_from/year_to, publisher, isbn, doi, language, format. Example: search(title="Simulacra", author="Baudrillard", format="pdf") or search(query="machine learning", year_from=2023, language="english").
 
-download: Get a fast download URL by MD5 hash from search results. Requires an Anna's Archive membership secret key (in X-Annas-Secret-Key header).
+download: Get a fast download URL by MD5 hash from search results. Requires a linked Anna's Archive membership key through OAuth or X-Annas-Secret-Key.
 
 read: Extract and return full text from a document by MD5 hash. Also requires membership secret key. Supports PDF, EPUB, DJVU, MOBI, and more. Use start_page/end_page to paginate, or list_chapters=true / chapter=N to navigate by chapter.`,
   });
@@ -81,9 +86,10 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
         format: z.string().trim().min(1).max(64).optional().describe("Filter by file format. Lowercase extension: 'pdf', 'epub', 'djvu', 'mobi', 'fb2', 'azw3', 'txt', 'docx', 'lit', 'rtf'."),
         limit: z.number().int().min(1).max(50).optional().describe("Max results to return. Default 10, max 50. Use higher values for broad searches."),
       },
+      _meta: oauthSecurity,
     },
     async ({ query, title, author, year_from, year_to, publisher, isbn, doi, language, format, limit }) => {
-      const authError = keyValidationError(await validateKey(readSecret(secretKey)));
+      const authError = keyValidationError(await credential.validateMembership());
       if (authError) {
         return { content: [{ type: "text", text: authError.message }], isError: true };
       }
@@ -125,22 +131,27 @@ RESULTS include: title, author, year, language, format, file size, MD5 hash, ISB
     {
       description: `Get a fast download URL for a document by its MD5 hash (from search results). Returns a temporary download link — use it promptly.
 
-Requires an Anna's Archive membership secret key configured in client headers (X-Annas-Secret-Key). Get one at https://annas-archive.gl/account .
+Requires a linked Anna's Archive membership key through OAuth or the X-Annas-Secret-Key header. Get one at https://annas-archive.gl/account .
 
 Present the URL as a clickable markdown link. To save locally: curl -L -o filename.ext '<url>'`,
       inputSchema: {
         md5: z.string().regex(MD5_PATTERN).describe("32-character hexadecimal MD5 hash from search results"),
       },
+      _meta: oauthSecurity,
     },
     async ({ md5 }) => {
-      const authError = keyValidationError(await validateKey(readSecret(secretKey)));
+      const authError = keyValidationError(await credential.validateMembership());
       if (authError) {
         return { content: [{ type: "text", text: authError.message }], isError: true };
       }
+      const secretKey = await credential.getPlaintextKey();
       const doc = await getByMd5(md5);
-      const result = await getDownloadUrl(md5, readSecret(secretKey));
+      const result = await getDownloadUrl(md5, secretKey);
 
       if (result.error) {
+        if (result.errorCode === "invalid_membership_key") {
+          await credential.invalidate();
+        }
         return { content: [{ type: "text", text: `Download failed: ${result.error}` }], isError: true };
       }
 
@@ -159,6 +170,7 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
     "stats",
     {
       description: "Get statistics about the local Anna's Archive metadata index — total records and breakdown by source collection.",
+      _meta: oauthSecurity,
     },
     async () => {
       const stats = await getStats();
@@ -175,7 +187,7 @@ Present the URL as a clickable markdown link. To save locally: curl -L -o filena
     {
       description: `Read the text content of a document by its MD5 hash. Downloads the file via fast download, extracts text, and returns it page by page OR chapter by chapter. Supports PDF, EPUB, DJVU, MOBI, AZW3, FB2, DOCX, RTF, and plain text. Results are cached — subsequent reads are instant.
 
-Requires a currently valid Anna's Archive membership secret key (configured in client headers as X-Annas-Secret-Key) for every read, including cached documents.
+Requires a currently valid Anna's Archive membership key linked through OAuth or configured in the X-Annas-Secret-Key header for every read, including cached documents.
 
 BEHAVIOR:
 - No arguments → returns page count, chapter count (if detected), and first page preview. Use this first to understand the document.
@@ -200,9 +212,10 @@ TYPICAL WORKFLOW:
         chapter: z.number().int().min(1).max(1_000_000).optional().describe("Read a specific chapter by its index (1-based, from the detected TOC). Use list_chapters first to see what's available. Mutually exclusive with start_page/end_page."),
         list_chapters: z.boolean().optional().describe("If true, returns the detected chapter list (titles + page ranges) instead of text."),
       },
+      _meta: oauthSecurity,
     },
     async ({ md5, start_page, end_page, chapter, list_chapters }) => {
-      const authError = keyValidationError(await validateKey(readSecret(secretKey)));
+      const authError = keyValidationError(await credential.validateMembership());
       if (authError) {
         return { content: [{ type: "text", text: authError.message }], isError: true };
       }
@@ -223,6 +236,7 @@ TYPICAL WORKFLOW:
           return { content: [{ type: "text", text: "A read request can include at most 100 pages." }], isError: true };
         }
       }
+      const secretKey = await credential.getPlaintextKey();
       const doc = await getByMd5(md5);
       const ext = doc?.extension || "pdf";
 
@@ -237,9 +251,12 @@ TYPICAL WORKFLOW:
           : `${start_page}-${Math.min(start_page + 19, 1_000_000)}`;
       }
 
-      const result = await readDocument(md5, ext, readSecret(secretKey), opts);
+      const result = await readDocument(md5, ext, secretKey, opts);
 
       if (result.error) {
+        if (result.errorCode === "invalid_membership_key") {
+          await credential.invalidate();
+        }
         return { content: [{ type: "text", text: `Read failed: ${result.error}` }], isError: true };
       }
 

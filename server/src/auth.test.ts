@@ -7,7 +7,7 @@ describe("keyValidationError", () => {
     assert.equal(keyValidationError({ ok: true }), null);
     assert.deepEqual(keyValidationError({ ok: false, reason: "missing" }), {
       status: 401,
-      message: "An Anna's Archive membership secret key is required. Provide it via the X-Annas-Secret-Key header.",
+      message: "An Anna's Archive membership key is required. Link with OAuth or provide X-Annas-Secret-Key.",
     });
     assert.deepEqual(keyValidationError({ ok: false, reason: "invalid" }), {
       status: 401,
